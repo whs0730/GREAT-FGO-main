@@ -1,0 +1,15 @@
+ERROR STATISTICS SUMMARY
+========================================
+Data: ..\sample_data\FGO_20250928\result\SEPT-RTK.fgo
+Reference: ..\sample_data\FGO_20250928\ref\groundtruth_0928_GNSS.txt
+Epochs: 898
+========================================
+
+POSITION ERRORS (m)
+-------------------------
+East   MAE: 0.046 RMSE: 0.153 Max: 1.349
+North  MAE: 0.051 RMSE: 0.134 Max: 1.532
+Up     MAE: 0.217 RMSE: 0.652 Max: 5.173
+
+Horizontal - MAE: 0.078 RMSE: 0.203 Max: 1.541
+3D        - MAE: 0.238 RMSE: 0.683 Max: 5.377

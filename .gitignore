@@ -1,0 +1,19 @@
+# Visual Studio
+.vs/
+
+# CMake / build output
+build/
+build_Windows/
+
+# Generated binaries and debug files
+*.log
+*.pdb
+*.dll
+*.exe
+*.ins
+
+# Runtime results
+result/
+
+# IDE
+.idea/sample_data/

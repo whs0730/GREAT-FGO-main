@@ -1,0 +1,27 @@
+ERROR STATISTICS SUMMARY
+========================================
+Data: ..\sample_data\FGO_20211012\result\SEPT-RTK-TCI-ADIS-FGO.ins
+Reference: ..\sample_data\FGO_20211012\ref\groundtruth_1012_ADIS.txt
+Epochs: 3702
+========================================
+
+POSITION ERRORS (m)
+-------------------------
+East   MAE: 0.058 RMSE: 0.141 Max: 3.787
+North  MAE: 0.065 RMSE: 0.150 Max: 2.742
+Up     MAE: 0.128 RMSE: 0.243 Max: 2.184
+
+Horizontal - MAE: 0.093 RMSE: 0.206 Max: 4.132
+3D        - MAE: 0.166 RMSE: 0.318 Max: 4.275
+
+VELOCITY ERRORS (m/s)
+-------------------------
+Vx     MAE: 0.008 RMSE: 0.023 Max: 0.875
+Vy     MAE: 0.013 RMSE: 0.024 Max: 0.273
+Vz     MAE: 0.008 RMSE: 0.014 Max: 0.381
+
+ATTITUDE ERRORS (°)
+-------------------------
+Yaw    MAE: 1.502 RMSE: 1.536 Max: 2.334
+Pitch  MAE: 0.100 RMSE: 0.115 Max: 0.632
+Roll   MAE: 0.865 RMSE: 0.895 Max: 1.496
