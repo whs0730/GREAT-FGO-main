@@ -115,24 +115,42 @@ int gfgomsf::t_gfgo_gins::ProcessBatch(const t_gtime& beg, const t_gtime& end, b
 				case GNSS_MEAS:
 				{
 					_cur_node_time = _gnss_crt.sow();
-					_gnss_processing();//process GNSS data
-					if (_c_gnss_factor)
-					{
-						_set_frame_pose(_rover_count);
-						//The first GNSS node only establishes a time benchmark and does not pre-integrate
-						if (_last_pre_integration_time < 0.0)
+					if (_msf_type == MSF_TYPE::GINS_TC_MODE) {
+						_gnss_processing();//process GNSS data
+						if (_c_gnss_factor)
 						{
-							_last_pre_integration_time = _cur_node_time;
-						}
-						else
-						{
+							_set_frame_pose(_rover_count);
 							_imu_pre_integration(_last_pre_integration_time, _cur_node_time);//IMU pre_integration
 							_last_pre_integration_time = _cur_node_time;
 						}
-						
+						_gins_processing();
 					}
-					if (_msf_type == MSF_TYPE::GINS_TC_MODE||_msf_type==MSF_TYPE::GINS_LC_MODE)
-						_gins_processing();//GNSS and IMU Fusion Optimization
+					else if(_msf_type == MSF_TYPE::GINS_LC_MODE){
+						_gnss_processing();
+						if (_c_gnss_factor)
+						{
+							_set_frame_pose(_rover_count);
+
+							// The loosely coupled first node has no previous node,  IMU pre-integration is not performed
+							if (_last_pre_integration_time < 0.0)
+							{
+								_last_pre_integration_time= _cur_node_time;
+							}
+							else
+							{
+								if (!_imu_pre_integration(_last_pre_integration_time,_cur_node_time))
+								{
+									std::cerr
+										<< "[LC ERROR] IMU pre-integration failed"
+										<< std::endl;
+									_c_gnss_factor = false;
+									break;
+								}
+								_last_pre_integration_time =_cur_node_time;
+							}
+						}
+						_gins_processing();
+					}
 				}break;
 				default:break;
 				}
@@ -600,9 +618,6 @@ int gfgomsf::t_gfgo_gins::_gnss_processing()
 	std::cout << "gnss_now:" << setprecision(10) << (_gnss_crt.sow() + _gnss_crt.dsec()) << endl;
 
 	t_gposdata::data_pos posdata;
-
-	_msf_flag = NO_MEAS;
-	_c_gnss_factor = false;
 	if ( _msf_type == MSF_TYPE::GINS_TC_MODE )
 	{
 		_msf_flag = _get_gnss_measurements(_gnss_crt);
@@ -628,7 +643,6 @@ int gfgomsf::t_gfgo_gins::_gnss_processing()
 
 			++_rover_count;
 			_current_lc_solution = posdata;
-			// 临时检查
 			std::cout << "[LC RTK] "
 				<< "time: " << posdata.t
 				<< " pos: " << posdata.pos.transpose()
@@ -657,21 +671,28 @@ int gfgomsf::t_gfgo_gins::_gins_processing()
 		{
 			gnssNode.has_lc_solution = true;
 			gnssNode.lc_solution = _current_lc_solution;
-			// 临时节点检查
-			std::cout << "[LC NODE]"
-				<< " node_time: " << std::setprecision(10)
-				<< _cur_node_time
-				<< " solution_time: "
-				<< gnssNode.lc_solution.t
-				<< " pos: "
-				<< gnssNode.lc_solution.pos.transpose()
-				<< " var: "
-				<< gnssNode.lc_solution.Rpos.transpose()
-				<< std::endl;
 		}
 		_all_gnss_node.insert(make_pair(_cur_node_time, gnssNode));
 		_tmp_pre_integration = new IntegrationBase{ _acc_0, _gyr_0, _Bas[_rover_count], _Bgs[_rover_count] };
 		_tmp_pre_integration->init_ins(_acc_n, _acc_w, _gyr_n, _gyr_w, _gravity);
+		if (_msf_type == MSF_TYPE::GINS_LC_MODE) {
+			std::cout
+				<< "[LC NODE]"
+				<< " frame=" << _rover_count
+				<< " node_time="
+				<< std::setprecision(10)
+				<< _cur_node_time
+				<< " solution_time="
+				<< gnssNode.lc_solution.t
+				<< " pos="
+				<< gnssNode.lc_solution.pos.transpose()
+				<< " node_count="
+				<< _all_gnss_node.size()
+				<< std::endl;
+
+			_c_gnss_factor = false;
+			return 0;
+		}
 		if (1 && _solver_flag == INITIAL)
 		{
 			if (_rover_count == gins_window_size)

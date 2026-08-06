@@ -126,7 +126,7 @@ namespace gfgomsf
 		 * Sets GNSS factor availability flag for integration
 		 */
 		int _gnss_processing();								/// process gnss data 
-
+		//int _gnss_lc_processing();								///loosely mode process gnss data
 		virtual void _double_to_vector() {};					/// unfished
 
 		virtual void _vector_to_double() {};					/// unfished	

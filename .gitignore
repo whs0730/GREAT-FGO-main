@@ -16,4 +16,6 @@ build_Windows/
 result/
 
 # IDE
-.idea/sample_data/
+.idea/
+
+sample_data/
