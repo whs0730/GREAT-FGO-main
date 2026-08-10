@@ -16,6 +16,7 @@
 #include "gfactor/pseudorange_DD_integration_factor.h"
 #include "gfactor/ginitial_pose_factor.h"
 #include "gfactor/ginitial_bias_factor.h"
+#include "gfactor/gnss_position_factor.h"
 using namespace gfgomsf;
 
 gfgomsf::t_gfgo_gins::t_gfgo_gins(string site, string site_base, t_gsetbase* gset, std::shared_ptr<spdlog::logger> spdlog, t_gallproc* allproc) :
@@ -859,241 +860,594 @@ void gfgomsf::t_gfgo_gins::_gins_vector_to_double()
 
 void gfgomsf::t_gfgo_gins::_gins_optimization()
 {
-	/*if (_cur_node_time == 200340.0)
+	if (_msf_type == MSF_TYPE::GINS_TC_MODE) 
+	{
+		/*if (_cur_node_time == 200340.0)
 		cerr << endl;*/
-	
-	if (_rover_count < 1)
-	{
-		_c_gnss_factor = false;
-		return;
-	}
-	t_tictoc fgo_gins;
-	_removed_sats.clear();
-	int count = -1;
-	bool iter_flag = false;
-	pair<string, int>  outlier = make_pair(" ", -1);
-	do
-	{
-		count++;
-		_remove_outlier_sat(outlier);
-		_gins_vector_to_double();
-		//if (_vDD_msg[_rover_count].size() <= 1)
-		if (_vDD_msg[_rover_count].size() < _minsat * 4)
+
+		if (_rover_count < 1)
 		{
-			_last_gnss_info->valid = false;
-			_opt_valid =0;
-			break;
+			_c_gnss_factor = false;
+			return;
 		}
-		ceres::Problem problem;
-		ceres::LossFunction* loss_function;
-		loss_function = new ceres::HuberLoss(_loss_func_value);
-
-		for (int i = 0; i <= _rover_count; i++)
+		t_tictoc fgo_gins;
+		_removed_sats.clear();
+		int count = -1;
+		bool iter_flag = false;
+		pair<string, int>  outlier = make_pair(" ", -1);
+		do
 		{
-			ceres::LocalParameterization* local_parameterization = new PoseLocalParameterization();
-			problem.AddParameterBlock(_para_pose[i], SIZE_POSE, local_parameterization);
-			if (_imu_enable)
-				problem.AddParameterBlock(_para_speed_bias[i], SIZE_SPEEDBIAS);
-
-			Eigen::Vector3d pos(_para_pose[i][0], _para_pose[i][1], _para_pose[i][2]);
-			Eigen::Quaterniond quat(_para_pose[i][6], _para_pose[i][3], _para_pose[i][4], _para_pose[i][5]);
-			InitialPoseFactor* initial_pose = new InitialPoseFactor(pos, quat);
-			initial_pose->sqrt_info = 1e-7 * Eigen::Matrix<double, 6, 6>::Identity();
-			problem.AddResidualBlock(initial_pose, NULL, _para_pose[i]);
-
-			InitialVelBiasFactor* initial_bias = new InitialVelBiasFactor(
-				Eigen::Vector3d(_para_speed_bias[i][0], _para_speed_bias[i][1], _para_speed_bias[i][2]),
-				Eigen::Vector3d(_para_speed_bias[i][3], _para_speed_bias[i][4], _para_speed_bias[i][5]),
-				Eigen::Vector3d(_para_speed_bias[i][6], _para_speed_bias[i][7], _para_speed_bias[i][8]));
-			initial_bias->sqrt_info = 1e-7 * Eigen::Matrix<double, 9, 9>::Identity();
-			problem.AddResidualBlock(initial_bias, NULL, _para_speed_bias[i]);
-
-		}
-
-		/*for (int i = 0; i < _amb_manager->ambiguity_ids.size(); i++)
-		{
-			int amb_id = _amb_manager->ambiguity_ids[i];
-			problem.AddParameterBlock(_para_amb[amb_id], SIZE_AMB);
-		}*/
-
-		// prior
-
-		if (_last_marginalization_info && _last_marginalization_info->valid)
-		{
-			// Constructing Marginalization Factors
-			MarginalizationFactor* marginalization_factor = new MarginalizationFactor(_last_marginalization_info);
-			problem.AddResidualBlock(marginalization_factor, NULL, _last_marginalization_parameter_blocks);
-		}
-
-		//IMU
-		
-		if (_rover_count > 0)
-		{
-			for (int i = 0; i < _rover_count; i++)
+			count++;
+			_remove_outlier_sat(outlier);
+			_gins_vector_to_double();
+			//if (_vDD_msg[_rover_count].size() <= 1)
+			if (_vDD_msg[_rover_count].size() < _minsat * 4)
 			{
-				int j = i + 1;
-				if (_pre_integrations[j]->sum_dt > _gtime_interval)
-					continue;
-				auto preint = _pre_integrations[j];
-				IMUFactor* imu_factor = new IMUFactor(_pre_integrations[j]);
-				problem.AddResidualBlock(imu_factor, NULL, _para_pose[i], _para_speed_bias[i], _para_pose[j], _para_speed_bias[j]);
+				_last_gnss_info->valid = false;
+				_opt_valid = 0;
+				break;
 			}
-		}
-		
-		//gnss
-		_obs_index.clear();
-		assert(_vDD_msg.size() == _rover_count + 1);
-		for (int i = 0; i <= _rover_count; i++)
-		{
-			vector<DDEquMsg> DD_tmp = _vDD_msg[i];
-			t_gtime crt = DD_tmp.begin()->time;
-			map<t_gtime, vector<t_gsatdata>>::const_iterator base_iter = _map_basedata.find(crt);
-			map<t_gtime, t_gallpar>::const_iterator param_iter = _map_param.find(crt);
-			if (base_iter == _map_basedata.end() || param_iter == _map_param.end())
-				continue;
-			int dd_equ_count = 0;
-			for (auto& dd_iter : DD_tmp)
+			ceres::Problem problem;
+			ceres::LossFunction* loss_function;
+			loss_function = new ceres::HuberLoss(_loss_func_value);
+
+			for (int i = 0; i <= _rover_count; i++)
 			{
-				/*if (_cur_node_time == 200340.0 && i == 2 && dd_iter.ref_sat == "G10" && dd_iter.nonref_sat == "G25")
-					cerr << endl;*/
+				ceres::LocalParameterization* local_parameterization = new PoseLocalParameterization();
+				problem.AddParameterBlock(_para_pose[i], SIZE_POSE, local_parameterization);
+				if (_imu_enable)
+					problem.AddParameterBlock(_para_speed_bias[i], SIZE_SPEEDBIAS);
 
-				if (!_get_DD_data(dd_iter, base_iter->second)) continue;
-				pair<string, string> base_rover_site = make_pair(dd_iter.base_site, dd_iter.rover_site);
-				pair<FREQ_SEQ, GOBSBAND> freq_band = make_pair(dd_iter.freq, dd_iter.band);
-				vector<pair<t_gsatdata, t_gsatdata>> DD_sat_data;
-				DD_sat_data.push_back(make_pair(dd_iter.base_ref_sat, dd_iter.rover_ref_sat));
-				DD_sat_data.push_back(make_pair(dd_iter.base_nonref_sat, dd_iter.rover_nonref_sat));
+				Eigen::Vector3d pos(_para_pose[i][0], _para_pose[i][1], _para_pose[i][2]);
+				Eigen::Quaterniond quat(_para_pose[i][6], _para_pose[i][3], _para_pose[i][4], _para_pose[i][5]);
+				InitialPoseFactor* initial_pose = new InitialPoseFactor(pos, quat);
+				initial_pose->sqrt_info = 1e-7 * Eigen::Matrix<double, 6, 6>::Identity();
+				problem.AddResidualBlock(initial_pose, NULL, _para_pose[i]);
 
-				//cout << "base_ref_sat:" << dd_iter.base_ref_sat.epoch().sow() <<
-				//	"  rover_ref_sat:" << dd_iter.rover_ref_sat.epoch().sow() << endl;
-				//cout << "base_nonref_sat:" << dd_iter.base_nonref_sat.epoch().sow() <<
-				//	"  rover_nonref_sat:" << dd_iter.rover_nonref_sat.epoch().sow() << endl;
+				InitialVelBiasFactor* initial_bias = new InitialVelBiasFactor(
+					Eigen::Vector3d(_para_speed_bias[i][0], _para_speed_bias[i][1], _para_speed_bias[i][2]),
+					Eigen::Vector3d(_para_speed_bias[i][3], _para_speed_bias[i][4], _para_speed_bias[i][5]),
+					Eigen::Vector3d(_para_speed_bias[i][6], _para_speed_bias[i][7], _para_speed_bias[i][8]));
+				initial_bias->sqrt_info = 1e-7 * Eigen::Matrix<double, 9, 9>::Identity();
+				problem.AddResidualBlock(initial_bias, NULL, _para_speed_bias[i]);
 
-				GOBSTYPE  obstype = dd_iter.obs_type;
-				_obs_index.push_back(make_pair(dd_iter.rover_nonref_sat.sat(), make_pair(dd_iter.freq, obstype)));
-				if (obstype == GOBSTYPE::TYPE_C)
-				{
-					PseudorangeDDINGFactor* pinsf = new PseudorangeDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
-					problem.AddResidualBlock(pinsf, NULL, _para_pose[i]);
-
-					/*double **para = new double *[3];
-					para[0] = _para_pose[i];
-					pinsf->check(para);*/
-				}
-				if (obstype == GOBSTYPE::TYPE_L)
-				{
-					int id1, id2;
-					id1 = _amb_manager->getAmbSearchIndex(make_pair(dd_iter.ref_sat_global_id, dd_iter.freq));
-					id2 = _amb_manager->getAmbSearchIndex(make_pair(dd_iter.nonref_sat_global_id, dd_iter.freq));
-					if (id1 == -1 || id2 == -1)
-						continue;
-					CarrierphaseDDINGFactor* linsf = new CarrierphaseDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
-					problem.AddResidualBlock(linsf, NULL, _para_pose[i], _para_amb[id1], _para_amb[id2]);
-
-
-
-					/*double **para = new double *[3];
-					para[0] = _para_pose[i];
-					para[1] = _para_amb[id1];
-					para[2] = _para_amb[id2];
-					linsf->check(para);*/
-				}
-				dd_equ_count++;
 			}
-			assert(dd_equ_count == DD_tmp.size());
-		}
 
-		// static constraints
-		//for (int i = 0; i <= _rover_count; i++)
-		//{
-		//	vector<DDEquMsg> DD_tmp = _vDD_msg[i];
-		//	t_gtime crt = DD_tmp.begin()->time; 
-		//	//if (crt.sow() + crt.dsec() > 449600 && crt.sow() + crt.dsec() < 449640)
-		//	//	continue;
-		//	map<t_gtime, MOTION_TYPE>::const_iterator it = _map_motion.find(crt);
-		//	if (it->second == MOTION_TYPE::m_static)
-		//	{
-		//		for (it; it != _map_motion.begin(); --it)
-		//		{
-		//			if (it->second != MOTION_TYPE::m_static)
-		//			{
-		//				++it; break;
-		//			}
-		//		}
-		//		map<t_gtime, pair<Eigen::Vector3d, Eigen::Quaterniond>>::const_iterator it_pose = _map_pose.find(it->first);
-		//		Eigen::Vector3d pos = it_pose->second.first;
-		//		Eigen::Quaterniond quat = it_pose->second.second;
-		//		InitialPoseFactor* pose_factor = new InitialPoseFactor(pos, quat);
-		//		pose_factor->sqrt_info = 1e4 * Eigen::Matrix<double, 6, 6>::Identity();
-		//		//ceres::CostFunction* pose_factor = PoseError::Create(pos.x(), pos.y(), pos.z(),
-		//		//	quat.w(), quat.x(), quat.y(), quat.z(), 1e-6, 1e-9);
-		//		problem.AddResidualBlock(pose_factor, NULL, _para_pose[i]);
-		//	}
-		//} 
-
-		//if (_initial_prior)
-
-		if (1)
-		{
-			for (int i = 0; i < _amb_manager->ambiguity_ids.size(); i++)
+			/*for (int i = 0; i < _amb_manager->ambiguity_ids.size(); i++)
 			{
 				int amb_id = _amb_manager->ambiguity_ids[i];
-				double initial_amb = _para_amb[amb_id][0];
-				InitialGnssAMB* amb_prior = new InitialGnssAMB(initial_amb);
-				problem.AddResidualBlock(amb_prior, NULL, _para_amb[amb_id]);
+				problem.AddParameterBlock(_para_amb[amb_id], SIZE_AMB);
+			}*/
+
+			// prior
+
+			if (_last_marginalization_info && _last_marginalization_info->valid)
+			{
+				// Constructing Marginalization Factors
+				MarginalizationFactor* marginalization_factor = new MarginalizationFactor(_last_marginalization_info);
+				problem.AddResidualBlock(marginalization_factor, NULL, _last_marginalization_parameter_blocks);
 			}
+
+			//IMU
+
+			if (_rover_count > 0)
+			{
+				for (int i = 0; i < _rover_count; i++)
+				{
+					int j = i + 1;
+					if (_pre_integrations[j]->sum_dt > _gtime_interval)
+						continue;
+					auto preint = _pre_integrations[j];
+					IMUFactor* imu_factor = new IMUFactor(_pre_integrations[j]);
+					problem.AddResidualBlock(imu_factor, NULL, _para_pose[i], _para_speed_bias[i], _para_pose[j], _para_speed_bias[j]);
+				}
+			}
+
+			//gnss
+			_obs_index.clear();
+			assert(_vDD_msg.size() == _rover_count + 1);
+			for (int i = 0; i <= _rover_count; i++)
+			{
+				vector<DDEquMsg> DD_tmp = _vDD_msg[i];
+				t_gtime crt = DD_tmp.begin()->time;
+				map<t_gtime, vector<t_gsatdata>>::const_iterator base_iter = _map_basedata.find(crt);
+				map<t_gtime, t_gallpar>::const_iterator param_iter = _map_param.find(crt);
+				if (base_iter == _map_basedata.end() || param_iter == _map_param.end())
+					continue;
+				int dd_equ_count = 0;
+				for (auto& dd_iter : DD_tmp)
+				{
+					/*if (_cur_node_time == 200340.0 && i == 2 && dd_iter.ref_sat == "G10" && dd_iter.nonref_sat == "G25")
+						cerr << endl;*/
+
+					if (!_get_DD_data(dd_iter, base_iter->second)) continue;
+					pair<string, string> base_rover_site = make_pair(dd_iter.base_site, dd_iter.rover_site);
+					pair<FREQ_SEQ, GOBSBAND> freq_band = make_pair(dd_iter.freq, dd_iter.band);
+					vector<pair<t_gsatdata, t_gsatdata>> DD_sat_data;
+					DD_sat_data.push_back(make_pair(dd_iter.base_ref_sat, dd_iter.rover_ref_sat));
+					DD_sat_data.push_back(make_pair(dd_iter.base_nonref_sat, dd_iter.rover_nonref_sat));
+
+					//cout << "base_ref_sat:" << dd_iter.base_ref_sat.epoch().sow() <<
+					//	"  rover_ref_sat:" << dd_iter.rover_ref_sat.epoch().sow() << endl;
+					//cout << "base_nonref_sat:" << dd_iter.base_nonref_sat.epoch().sow() <<
+					//	"  rover_nonref_sat:" << dd_iter.rover_nonref_sat.epoch().sow() << endl;
+
+					GOBSTYPE  obstype = dd_iter.obs_type;
+					_obs_index.push_back(make_pair(dd_iter.rover_nonref_sat.sat(), make_pair(dd_iter.freq, obstype)));
+					if (obstype == GOBSTYPE::TYPE_C)
+					{
+						PseudorangeDDINGFactor* pinsf = new PseudorangeDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
+						problem.AddResidualBlock(pinsf, NULL, _para_pose[i]);
+
+						/*double **para = new double *[3];
+						para[0] = _para_pose[i];
+						pinsf->check(para);*/
+					}
+					if (obstype == GOBSTYPE::TYPE_L)
+					{
+						int id1, id2;
+						id1 = _amb_manager->getAmbSearchIndex(make_pair(dd_iter.ref_sat_global_id, dd_iter.freq));
+						id2 = _amb_manager->getAmbSearchIndex(make_pair(dd_iter.nonref_sat_global_id, dd_iter.freq));
+						if (id1 == -1 || id2 == -1)
+							continue;
+						CarrierphaseDDINGFactor* linsf = new CarrierphaseDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
+						problem.AddResidualBlock(linsf, NULL, _para_pose[i], _para_amb[id1], _para_amb[id2]);
+
+
+
+						/*double **para = new double *[3];
+						para[0] = _para_pose[i];
+						para[1] = _para_amb[id1];
+						para[2] = _para_amb[id2];
+						linsf->check(para);*/
+					}
+					dd_equ_count++;
+				}
+				assert(dd_equ_count == DD_tmp.size());
+			}
+
+			// static constraints
+			//for (int i = 0; i <= _rover_count; i++)
+			//{
+			//	vector<DDEquMsg> DD_tmp = _vDD_msg[i];
+			//	t_gtime crt = DD_tmp.begin()->time; 
+			//	//if (crt.sow() + crt.dsec() > 449600 && crt.sow() + crt.dsec() < 449640)
+			//	//	continue;
+			//	map<t_gtime, MOTION_TYPE>::const_iterator it = _map_motion.find(crt);
+			//	if (it->second == MOTION_TYPE::m_static)
+			//	{
+			//		for (it; it != _map_motion.begin(); --it)
+			//		{
+			//			if (it->second != MOTION_TYPE::m_static)
+			//			{
+			//				++it; break;
+			//			}
+			//		}
+			//		map<t_gtime, pair<Eigen::Vector3d, Eigen::Quaterniond>>::const_iterator it_pose = _map_pose.find(it->first);
+			//		Eigen::Vector3d pos = it_pose->second.first;
+			//		Eigen::Quaterniond quat = it_pose->second.second;
+			//		InitialPoseFactor* pose_factor = new InitialPoseFactor(pos, quat);
+			//		pose_factor->sqrt_info = 1e4 * Eigen::Matrix<double, 6, 6>::Identity();
+			//		//ceres::CostFunction* pose_factor = PoseError::Create(pos.x(), pos.y(), pos.z(),
+			//		//	quat.w(), quat.x(), quat.y(), quat.z(), 1e-6, 1e-9);
+			//		problem.AddResidualBlock(pose_factor, NULL, _para_pose[i]);
+			//	}
+			//} 
+
+			//if (_initial_prior)
+
+			if (1)
+			{
+				for (int i = 0; i < _amb_manager->ambiguity_ids.size(); i++)
+				{
+					int amb_id = _amb_manager->ambiguity_ids[i];
+					double initial_amb = _para_amb[amb_id][0];
+					InitialGnssAMB* amb_prior = new InitialGnssAMB(initial_amb);
+					problem.AddResidualBlock(amb_prior, NULL, _para_amb[amb_id]);
+				}
+			}
+
+			///*if (_cur_node_time == 200340.0)
+			//{*/
+			//	Eigen::MatrixXd jacobian = GetFullJacobian(problem);
+			//	std::cout << jacobian << endl;
+			////}
+			//AnalyzeFullJacobian(problem);
+
+			//optimization	
+			//ceres::Solver::Options options;
+			//options.minimizer_type = ceres::LINE_SEARCH;
+			////options.trust_region_strategy_type = ceres::DOGLEG;
+			//options.max_num_iterations = 1;
+
+
+			ceres::Solver::Options options;
+			options.linear_solver_type = ceres::DENSE_SCHUR;
+			options.trust_region_strategy_type = ceres::DOGLEG;
+			//options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+			//options.use_nonmonotonic_steps = false;
+			//options.min_trust_region_radius = options.max_trust_region_radius = 1e6;
+			options.max_num_iterations = 5;
+			ceres::Solver::Summary summary;
+			ceres::Solve(options, &problem, &summary);
+			std::cout << summary.BriefReport() << endl;
+			_opt_valid = 1;
+			//_gins_posteriori_test();
+			_gins_posteriori_test(problem);
+			if (_gobs_outlier_detection(outlier) >= 0)
+				iter_flag = true;
+			else
+				iter_flag = false;
+			//_detect_outlier()
+		} while (iter_flag);
+
+		std::cout << "Epoch: " << _cur_node_time << " time cost (ms): " << fgo_gins.toc() << " iter times: " << count << endl;
+		if (_last_gnss_info->valid)
+		{
+			std::cout << "sigma: " << _last_gnss_info->sig_unit << "  vtpv: " << _last_gnss_info->vtpv << std::endl;
+			_gins_double_to_vector();
+			_opt_flag = true;
+
+			if (_spdlog)
+				_spdlog->info("Epoch: {} GNSS/SINS Integrated Navigation Processing Succeed at Epoch: {}", _cur_node_time, _imu_crt.str_ymdhms(""));
+
+		}
+		else
+		{
+
+			if (_spdlog)
+				_spdlog->warn("Epoch: {} GNSS/SINS Integrated Navigation Processing Failed at Epoch: {}", _cur_node_time, _imu_crt.str_ymdhms(""));
+		}
+	}
+	else if(_msf_type == MSF_TYPE::GINS_LC_MODE)
+	{
+		if (_rover_count < 1)
+		{
+			_c_gnss_factor = false;
+			return;
 		}
 
-		///*if (_cur_node_time == 200340.0)
-		//{*/
-		//	Eigen::MatrixXd jacobian = GetFullJacobian(problem);
-		//	std::cout << jacobian << endl;
-		////}
-		//AnalyzeFullJacobian(problem);
+		t_tictoc fgo_gins;
 
-		//optimization	
-		//ceres::Solver::Options options;
-		//options.minimizer_type = ceres::LINE_SEARCH;
-		////options.trust_region_strategy_type = ceres::DOGLEG;
-		//options.max_num_iterations = 1;
+		_removed_sats.clear();
+
+		int count = -1;
+		bool iter_flag = false;
+
+		// Used only by tightly coupled GNSS outlier detection
+		pair<string, int> outlier = make_pair(" ", -1);
+
+		// Used to judge whether LC optimization succeeds
+		bool lc_optimization_valid = false;
+		do
+		{
+			count++;
+
+			/**********************************************************************
+			 * 1. Convert state vectors to Ceres parameter arrays
+			 **********************************************************************/
+			_gins_vector_to_double();
 
 
-		ceres::Solver::Options options;
-		options.linear_solver_type = ceres::DENSE_SCHUR;
-		options.trust_region_strategy_type = ceres::DOGLEG;
-		//options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-		//options.use_nonmonotonic_steps = false;
-		//options.min_trust_region_radius = options.max_trust_region_radius = 1e6;
-		options.max_num_iterations = 5;
-		ceres::Solver::Summary summary;
- 		ceres::Solve(options, &problem, &summary);
-		std::cout << summary.BriefReport() << endl;
-		_opt_valid = 1;
-		//_gins_posteriori_test();
-		_gins_posteriori_test(problem);
-		if (_gobs_outlier_detection(outlier) >= 0)
-			iter_flag = true;
-		else
-			iter_flag = false;
-		//_detect_outlier()
-	} while (iter_flag);
+			/**********************************************************************
+			 * 2. Construct Ceres problem
+			 **********************************************************************/
+			ceres::Problem problem;
 
-	std::cout << "Epoch: " << _cur_node_time << " time cost (ms): " << fgo_gins.toc() << " iter times: " << count << endl;
-	if (_last_gnss_info->valid)
-	{
-		std::cout << "sigma: " << _last_gnss_info->sig_unit << "  vtpv: " << _last_gnss_info->vtpv << std::endl;
-		_gins_double_to_vector();
-		_opt_flag = true;
-		
-		if (_spdlog)
-			_spdlog->info("Epoch: {} GNSS/SINS Integrated Navigation Processing Succeed at Epoch: {}", _cur_node_time, _imu_crt.str_ymdhms(""));
-			
-	}
-	else
-	{
-		
-		if (_spdlog)
-			_spdlog->warn("Epoch: {} GNSS/SINS Integrated Navigation Processing Failed at Epoch: {}", _cur_node_time, _imu_crt.str_ymdhms(""));
+
+			/**********************************************************************
+			 * 3. Add state parameter blocks
+			 **********************************************************************/
+			for (int i = 0; i <= _rover_count; i++)
+			{
+				// Pose:
+				// [px py pz qx qy qz qw]
+				ceres::LocalParameterization* local_parameterization =
+					new PoseLocalParameterization();
+
+				problem.AddParameterBlock(
+					_para_pose[i],
+					SIZE_POSE,
+					local_parameterization
+				);
+
+				// Velocity + accelerometer bias + gyroscope bias
+				if (_imu_enable)
+				{
+					problem.AddParameterBlock(
+						_para_speed_bias[i],
+						SIZE_SPEEDBIAS
+					);
+				}
+
+
+				/******************************************************************
+				 * Very weak pose prior
+				 *
+				 * Mainly used to prevent numerical singularity.
+				 ******************************************************************/
+				Eigen::Vector3d pos(
+					_para_pose[i][0],
+					_para_pose[i][1],
+					_para_pose[i][2]
+				);
+
+				Eigen::Quaterniond quat(
+					_para_pose[i][6],
+					_para_pose[i][3],
+					_para_pose[i][4],
+					_para_pose[i][5]
+				);
+
+				InitialPoseFactor* initial_pose =
+					new InitialPoseFactor(pos, quat);
+
+				initial_pose->sqrt_info =
+					1e-7 * Eigen::Matrix<double, 6, 6>::Identity();
+
+				problem.AddResidualBlock(
+					initial_pose,
+					NULL,
+					_para_pose[i]
+				);
+
+
+				/******************************************************************
+				 * Very weak velocity/bias prior
+				 ******************************************************************/
+				InitialVelBiasFactor* initial_bias =
+					new InitialVelBiasFactor(
+						Eigen::Vector3d(
+							_para_speed_bias[i][0],
+							_para_speed_bias[i][1],
+							_para_speed_bias[i][2]
+						),
+						Eigen::Vector3d(
+							_para_speed_bias[i][3],
+							_para_speed_bias[i][4],
+							_para_speed_bias[i][5]
+						),
+						Eigen::Vector3d(
+							_para_speed_bias[i][6],
+							_para_speed_bias[i][7],
+							_para_speed_bias[i][8]
+						)
+					);
+
+				initial_bias->sqrt_info =
+					1e-7 * Eigen::Matrix<double, 9, 9>::Identity();
+
+				problem.AddResidualBlock(
+					initial_bias,
+					NULL,
+					_para_speed_bias[i]
+				);
+			}
+
+
+			/**********************************************************************
+			 * 4. Marginalization prior
+			 **********************************************************************/
+			if (_last_marginalization_info &&
+				_last_marginalization_info->valid)
+			{
+				MarginalizationFactor* marginalization_factor =
+					new MarginalizationFactor(
+						_last_marginalization_info
+					);
+
+				problem.AddResidualBlock(
+					marginalization_factor,
+					NULL,
+					_last_marginalization_parameter_blocks
+				);
+			}
+
+
+			/**********************************************************************
+			 * 5. IMU pre-integration factors
+			 *
+			 * Shared by LC and TC.
+			 *
+			 *      Xi -------- IMU -------- Xj
+			 *
+			 **********************************************************************/
+			if (_imu_enable && _rover_count > 0)
+			{
+				for (int i = 0; i < _rover_count; i++)
+				{
+					int j = i + 1;
+
+					if (_pre_integrations[j] == nullptr)
+						continue;
+
+					// Skip excessively long IMU integration intervals
+					if (_pre_integrations[j]->sum_dt > _gtime_interval)
+						continue;
+
+					IMUFactor* imu_factor =
+						new IMUFactor(_pre_integrations[j]);
+
+					problem.AddResidualBlock(
+						imu_factor,
+						NULL,
+						_para_pose[i],
+						_para_speed_bias[i],
+						_para_pose[j],
+						_para_speed_bias[j]
+					);
+				}
+			}
+
+
+			/**********************************************************************
+			 * 6. GNSS factors
+			 *
+			 * LC:
+			 *
+			 *      RTK position
+			 *           |
+			 *      PositionFactor
+			 *           |
+			 *           Xi
+			 *
+			 *
+			 * TC:
+			 *
+			 *      pseudorange / carrier phase DD
+			 *                    |
+			 *                 GNSS Factor
+			 *                    |
+			 *                    Xi
+			 *
+			 **********************************************************************/
+			 /******************************************************************
+			  * 8.1 Loosely coupled RTK position factors
+			  ******************************************************************/
+			int lc_factor_count = 0;
+
+			for (int i = 0; i <= _rover_count; ++i)
+			{
+				// _headers[i] is the epoch corresponding to _para_pose[i]
+				double node_time = _headers[i];
+
+				// Find RTK solution corresponding to this state node
+				auto node_it =
+					_all_gnss_node.find(node_time);
+
+				if (node_it == _all_gnss_node.end())
+				{
+					std::cerr
+						<< "[LC WARNING] Cannot find GNSS node at time: "
+						<< std::setprecision(10)
+						<< node_time
+						<< std::endl;
+
+					continue;
+				}
+
+				if (!node_it->second.has_lc_solution)
+				{
+					std::cerr
+						<< "[LC WARNING] GNSS node has no RTK solution at time: "
+						<< std::setprecision(10)
+						<< node_time
+						<< std::endl;
+
+					continue;
+				}
+
+
+				const t_gposdata::data_pos& lc_solution =
+					node_it->second.lc_solution;
+
+
+				/**************************************************************
+				 * Position residual:
+				 *
+				 * r =
+				 * sqrt_info *
+				 * (
+				 *     P_IMU
+				 *   + R_EB * lever
+				 *   - P_RTK
+				 * )
+				 **************************************************************/
+				GnssPositionFactor* position_factor =
+					new GnssPositionFactor(
+						lc_solution.pos,
+						lc_solution.Rpos,
+						lever
+					);
+
+
+				/**************************************************************
+				 * Connect GNSS position factor to pose state i
+				 **************************************************************/
+				problem.AddResidualBlock(
+					position_factor,
+					NULL,
+					_para_pose[i]
+				);
+
+				lc_factor_count++;
+
+
+				std::cout
+					<< "[LC FACTOR]"
+					<< " frame=" << i
+					<< " time="
+					<< std::setprecision(10)
+					<< node_time
+					<< " rtk_pos="
+					<< lc_solution.pos.transpose()
+					<< " rtk_var="
+					<< lc_solution.Rpos.transpose()
+					<< std::endl;
+			}
+
+
+			// No RTK position factor -> no valid LC optimization
+			if (lc_factor_count == 0)
+			{
+				std::cerr
+					<< "[LC ERROR] No valid RTK position factor in current window."
+					<< std::endl;
+
+				_opt_valid = 0;
+				lc_optimization_valid = false;
+
+				break;
+			}
+			/**********************************************************************
+			 * 10. Ceres optimization
+			 **********************************************************************/
+			ceres::Solver::Options options;
+
+			options.linear_solver_type =
+				ceres::DENSE_SCHUR;
+
+			options.trust_region_strategy_type =
+				ceres::DOGLEG;
+
+			options.max_num_iterations = 5;
+
+
+			ceres::Solver::Summary summary;
+
+
+			ceres::Solve(
+				options,
+				&problem,
+				&summary
+			);
+
+
+			std::cout
+				<< summary.BriefReport()
+				<< std::endl;
+
+
+			/**********************************************************************
+			 * 11. Post-processing
+			 **********************************************************************/
+			 /******************************************************************
+			  * Original TC posterior test and satellite outlier detection
+			  ******************************************************************/
+			_opt_valid = 1;
+
+			_gins_posteriori_test(problem);
+
+
+			if (_gobs_outlier_detection(outlier) >= 0)
+			{
+				iter_flag = true;
+			}
+			else
+			{
+				iter_flag = false;
+			}
+		} while (iter_flag);
 	}
 }
 

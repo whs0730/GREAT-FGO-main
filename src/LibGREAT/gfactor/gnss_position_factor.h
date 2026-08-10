@@ -80,8 +80,8 @@ namespace gfgo
 
                     jacobian_pose.col(6).setZero();
 
-                    jacobian_pose =
-                        _sqrt_info * jacobian_pose;
+                    jacobian_pose = _sqrt_info * jacobian_pose;
+
                 }
             }
 
