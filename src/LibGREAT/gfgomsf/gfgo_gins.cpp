@@ -1109,13 +1109,9 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 
 		t_tictoc fgo_gins;
 
-		_removed_sats.clear();
-
 		int count = -1;
 		bool iter_flag = false;
 
-		// Used only by tightly coupled GNSS outlier detection
-		pair<string, int> outlier = make_pair(" ", -1);
 
 		// Used to judge whether LC optimization succeeds
 		bool lc_optimization_valid = false;
@@ -1429,25 +1425,69 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 
 
 			/**********************************************************************
-			 * 11. Post-processing
-			 **********************************************************************/
-			 /******************************************************************
-			  * Original TC posterior test and satellite outlier detection
-			  ******************************************************************/
-			_opt_valid = 1;
-
-			_gins_posteriori_test(problem);
-
-
-			if (_gobs_outlier_detection(outlier) >= 0)
+			 * 11. Check loosely coupled optimization result
+			**********************************************************************/
+			if (summary.IsSolutionUsable())
 			{
-				iter_flag = true;
+				_opt_valid = 1;
+				lc_optimization_valid = true;
 			}
 			else
 			{
-				iter_flag = false;
+				_opt_valid = 0;
+				lc_optimization_valid = false;
 			}
+
+			// LC does not perform DD satellite-level outlier iteration
+			iter_flag = false;
+
 		} while (iter_flag);
+		/**********************************************************************
+		* Write optimized result back
+		**********************************************************************/
+		std::cout
+			<< "[LC OPT] Epoch: "
+			<< _cur_node_time
+			<< " time cost (ms): "
+			<< fgo_gins.toc()
+			<< std::endl;
+
+		if (lc_optimization_valid)
+		{
+			_gins_double_to_vector();
+
+			_opt_flag = true;
+
+			std::cout
+				<< "[LC OPT] GNSS/INS loosely coupled optimization succeeded."
+				<< std::endl;
+
+			if (_spdlog)
+			{
+				_spdlog->info(
+					"Epoch: {} GNSS/SINS LC Processing Succeed at Epoch: {}",
+					_cur_node_time,
+					_imu_crt.str_ymdhms("")
+				);
+			}
+		}
+		else
+		{
+			_opt_flag = false;
+
+			std::cerr
+				<< "[LC OPT] GNSS/INS loosely coupled optimization failed."
+				<< std::endl;
+
+			if (_spdlog)
+			{
+				_spdlog->warn(
+					"Epoch: {} GNSS/SINS LC Processing Failed at Epoch: {}",
+					_cur_node_time,
+					_imu_crt.str_ymdhms("")
+				);
+			}
+		}
 	}
 }
 
