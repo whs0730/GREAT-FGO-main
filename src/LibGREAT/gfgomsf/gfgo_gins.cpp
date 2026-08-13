@@ -438,11 +438,25 @@ MEAS_TYPE gfgomsf::t_gfgo_gins::_getPOS(t_gposdata::data_pos& pos)
 	double crt = _imu_crt.sow() + _imu_crt.dsec();
 	t_gtime runEpoch = _gobs->load(_site, crt);
 	int irc = ProcessOneEpoch(runEpoch);
-	if (irc < 0) {
+	if (irc < 0)
+	{
+		std::cout
+			<< "[LC REJECT] time=" << crt
+			<< " reason=ProcessOneEpoch"
+			<< " irc=" << irc
+			<< std::endl;
+
 		return MEAS_TYPE::NO_MEAS;
 	}
 	_get_result(runEpoch, pos);
-
+	std::cout
+		<< "[LC POS RAW]"
+		<< " time=" << crt
+		<< " pos=" << pos.pos.transpose()
+		<< " var=" << pos.Rpos.transpose()
+		<< " PDOP=" << pos.PDOP
+		<< " nSat=" << pos.nSat
+		<< std::endl;
 	MeasVel = pos.vn ; MeasPos = pos.pos; tmeas = pos.t;
 	_Cov_MeasVn = pos.Rvn; _Cov_MeasPos = pos.Rpos;
 
@@ -456,8 +470,31 @@ MEAS_TYPE gfgomsf::t_gfgo_gins::_getPOS(t_gposdata::data_pos& pos)
 	if (!double_eq(MeasVel.norm(), 0.0))
 		res_type = POS_VEL_MEAS;
 
-	if (pos.PDOP > _shm.max_pdop)res_type = NO_MEAS;
-	if (pos.nSat < _shm.min_sat)res_type = NO_MEAS;
+	if (pos.PDOP > _shm.max_pdop)
+	{
+		std::cout
+			<< "[LC REJECT] time=" << crt
+			<< " reason=PDOP"
+			<< " PDOP=" << pos.PDOP
+			<< " max_pdop=" << _shm.max_pdop
+			<< " nSat=" << pos.nSat
+			<< std::endl;
+
+		res_type = NO_MEAS;
+	}
+
+	if (pos.nSat < _shm.min_sat)
+	{
+		std::cout
+			<< "[LC REJECT] time=" << crt
+			<< " reason=nSat"
+			<< " nSat=" << pos.nSat
+			<< " min_sat=" << _shm.min_sat
+			<< " PDOP=" << pos.PDOP
+			<< std::endl;
+
+		res_type = NO_MEAS;
+	}
 
 
 
@@ -690,6 +727,36 @@ int gfgomsf::t_gfgo_gins::_gins_processing()
 				<< " node_count="
 				<< _all_gnss_node.size()
 				<< std::endl;
+			if (_rover_count == gins_window_size)
+			{
+				std::cout
+					<< "[LC OPT] Window is full. Start first LC optimization."
+					<< std::endl;
+
+				for (int i = 1; i <= _rover_count; ++i)
+				{
+					if (_pre_integrations[i] != nullptr)
+					{
+						_pre_integrations[i]->repropagate(
+							Eigen::Vector3d::Zero(),
+							_Bgs[i - 1]
+						);
+					}
+				}
+
+				// RTK position factors + IMU factors
+				_gins_optimization();
+
+
+				if (_opt_valid)
+				{
+					_solver_flag = NON_LINEAR;
+
+					std::cout
+						<< "[LC OPT] First LC window optimization finished."
+						<< std::endl;
+				}
+			}
 
 			_c_gnss_factor = false;
 			return 0;
