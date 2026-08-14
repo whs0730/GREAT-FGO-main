@@ -820,9 +820,13 @@ void gfgomsf::t_gfgo_gins::_gins_feedback()
 		sins.Ceb = t_gbase::q2mat(sins.qeb);
 		sins.ve = _Vs[_rover_count];
 		sins.pos_ecef = _Ps[_rover_count];
-		Eigen::Vector3d robustpos;
-		if (_getRobustFixedPosition(robustpos))
-			sins.pos_ecef = robustpos;
+		if (_msf_type == MSF_TYPE::GINS_TC_MODE)
+		{
+			Eigen::Vector3d robustpos;
+
+			if (_getRobustFixedPosition(robustpos))
+				sins.pos_ecef = robustpos;
+		}
 		//sins.pos_ecef = pos.pos;
 		sins.eb = mean_bg;
 		sins.db = mean_ba;
@@ -1724,57 +1728,203 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 void gfgomsf::t_gfgo_gins::_slide_gins()
 {
 	double t_0 = t_gfgo_gins::_headers[0];
-	if (_rover_count == gins_window_size)
-	{
-		for (int i = 0; i < _rover_count; i++)
+	if (_rover_count != gins_window_size) {
+		std::cout << "gins_window is not full" << endl;
+		return;
+	}
+	if (_msf_type == MSF_TYPE::GINS_TC_MODE) {
+		if (_rover_count == gins_window_size)
 		{
-			t_gfgo_gins::_headers[i] = t_gfgo_gins::_headers[i + 1];
-			_Rs[i].swap(_Rs[i + 1]);
-			_Ps[i].swap(_Ps[i + 1]);
+			for (int i = 0; i < _rover_count; i++)
+			{
+				t_gfgo_gins::_headers[i] = t_gfgo_gins::_headers[i + 1];
+				_Rs[i].swap(_Rs[i + 1]);
+				_Ps[i].swap(_Ps[i + 1]);
+				if (_imu_enable)
+				{
+					std::swap(_pre_integrations[i], _pre_integrations[i + 1]);
+
+					_dt_buf[i].swap(_dt_buf[i + 1]);
+					_linear_acceleration_buf[i].swap(_linear_acceleration_buf[i + 1]);
+					_angular_velocity_buf[i].swap(_angular_velocity_buf[i + 1]);
+
+					_Vs[i].swap(_Vs[i + 1]);
+					_Bas[i].swap(_Bas[i + 1]);
+					_Bgs[i].swap(_Bgs[i + 1]);
+				}
+			}
+
 			if (_imu_enable)
 			{
-				std::swap(_pre_integrations[i], _pre_integrations[i + 1]);
+				delete _pre_integrations[_rover_count];
+				_pre_integrations[_rover_count] = new IntegrationBase{ _acc_0, _gyr_0, _Bas[_rover_count], _Bgs[_rover_count] };
+				_pre_integrations[_rover_count]->init_ins(_acc_n, _acc_w, _gyr_n, _gyr_w, _gravity);
+				/*delete _pre_integrations[WINDOW_SIZE];
+				_pre_integrations[WINDOW_SIZE] = new IntegrationBase{ _acc_0, _gyr_0, _Bas[WINDOW_SIZE], _Bgs[WINDOW_SIZE] };*/
+				_dt_buf[_rover_count].clear();
+				_linear_acceleration_buf[_rover_count].clear();
+				_angular_velocity_buf[_rover_count].clear();
+			}
 
-				_dt_buf[i].swap(_dt_buf[i + 1]);
-				_linear_acceleration_buf[i].swap(_linear_acceleration_buf[i + 1]);
-				_angular_velocity_buf[i].swap(_angular_velocity_buf[i + 1]);
+			if (true || _solver_flag == INITIAL)
+			{
+				//pre_integration = nullptr;
+				map<double, t_gnss_node>::iterator it_0 = _all_gnss_node.find(t_0);
 
-				_Vs[i].swap(_Vs[i + 1]);
-				_Bas[i].swap(_Bas[i + 1]);
-				_Bgs[i].swap(_Bgs[i + 1]);
+				delete it_0->second.pre_integration;
+				_all_gnss_node.erase(_all_gnss_node.begin(), it_0);
+			}
+
+			while (_map_motion.rbegin()->first - _map_motion.begin()->first > 60 * 10)
+			{
+				_map_motion.erase(std::begin(_map_motion));
+			}
+			//slide gnss 
+			_vDD_msg.erase(_vDD_msg.begin());
+			_amb_manager->slidingWindow();
+			_rover_count--;
+		}
+	}
+	else if (_msf_type == MSF_TYPE::GINS_LC_MODE) {
+		const int old_rover_count = _rover_count;
+		/******************************************************************
+		 * 1. Shift states one slot to the left
+		 ******************************************************************/
+		for (int i = 0; i < old_rover_count; ++i)
+		{
+			_headers[i] = _headers[i + 1];
+
+			_Rs[i] = _Rs[i + 1];
+			_Ps[i] = _Ps[i + 1];
+
+			if (_imu_enable)
+			{
+			/**********************************************************
+			* Pre-integration indexing:
+			**********************************************************/
+				std::swap(
+					_pre_integrations[i],
+					_pre_integrations[i + 1]
+				);
+
+				_dt_buf[i].swap(
+					_dt_buf[i + 1]
+				);
+
+				_linear_acceleration_buf[i].swap(
+					_linear_acceleration_buf[i + 1]
+				);
+
+				_angular_velocity_buf[i].swap(
+					_angular_velocity_buf[i + 1]
+				);
+
+				_Vs[i] = _Vs[i + 1];
+				_Bas[i] = _Bas[i + 1];
+				_Bgs[i] = _Bgs[i + 1];
 			}
 		}
 
+
+		/******************************************************************
+		 * 2. Prepare the free slot for the next IMU pre-integration
+		 ******************************************************************/
 		if (_imu_enable)
 		{
-			delete _pre_integrations[_rover_count];
-			_pre_integrations[_rover_count] = new IntegrationBase{ _acc_0, _gyr_0, _Bas[_rover_count], _Bgs[_rover_count] };
-			_pre_integrations[_rover_count]->init_ins(_acc_n, _acc_w, _gyr_n, _gyr_w, _gravity);
-			/*delete _pre_integrations[WINDOW_SIZE];
-			_pre_integrations[WINDOW_SIZE] = new IntegrationBase{ _acc_0, _gyr_0, _Bas[WINDOW_SIZE], _Bgs[WINDOW_SIZE] };*/
-			_dt_buf[_rover_count].clear();
-			_linear_acceleration_buf[_rover_count].clear();
-			_angular_velocity_buf[_rover_count].clear();
-		}
+			// After the state shift, the newest retained state is here
+			const int newest_state_index =old_rover_count - 1;
 
-		if (true || _solver_flag == INITIAL)
+			// The last pre-integration slot is now free
+			delete _pre_integrations[old_rover_count];
+
+			_pre_integrations[old_rover_count] =
+				new IntegrationBase{
+					_acc_0,
+					_gyr_0,
+					_Bas[newest_state_index],
+					_Bgs[newest_state_index]
+			};
+
+			_pre_integrations[old_rover_count]->init_ins(
+				_acc_n,
+				_acc_w,
+				_gyr_n,
+				_gyr_w,
+				_gravity
+			);
+
+			_dt_buf[old_rover_count].clear();
+
+			_linear_acceleration_buf[old_rover_count].clear();
+
+			_angular_velocity_buf[old_rover_count].clear();
+			/**************************************************************
+			 * _tmp_pre_integration is used to accumulate the interval
+			 **************************************************************/
+			if (_tmp_pre_integration != nullptr)
+			{
+				delete _tmp_pre_integration;
+				_tmp_pre_integration = nullptr;
+			}
+
+			_tmp_pre_integration =
+				new IntegrationBase{
+					_acc_0,
+					_gyr_0,
+					_Bas[newest_state_index],
+					_Bgs[newest_state_index]
+			};
+
+			_tmp_pre_integration->init_ins(
+				_acc_n,
+				_acc_w,
+				_gyr_n,
+				_gyr_w,
+				_gravity
+			);
+		}
+		/******************************************************************
+		 * 3. Remove the oldest GNSS/RTK node
+		 ******************************************************************/
+		auto old_node =
+			_all_gnss_node.find(t_0);
+
+		if (old_node != _all_gnss_node.end())
 		{
-			//pre_integration = nullptr;
-			map<double, t_gnss_node>::iterator it_0 = _all_gnss_node.find(t_0);
+			if (old_node->second.pre_integration != nullptr)
+			{
+				delete old_node->second.pre_integration;
+				old_node->second.pre_integration = nullptr;
+			}
 
-			delete it_0->second.pre_integration;
-			_all_gnss_node.erase(_all_gnss_node.begin(), it_0);
+			_all_gnss_node.erase(old_node);
 		}
-
-		while (_map_motion.rbegin()->first - _map_motion.begin()->first > 60 * 10)
+		else
 		{
-			_map_motion.erase(std::begin(_map_motion));
+			std::cerr
+				<< "[LC SLIDE WARNING] Cannot find oldest node: "
+				<< std::setprecision(10)
+				<< t_0
+				<< std::endl;
 		}
-		//slide gnss 
-		_vDD_msg.erase(_vDD_msg.begin());
-		_amb_manager->slidingWindow();
-		_rover_count--;
+		/******************************************************************
+		 * 4. Release one state slot
+		 ******************************************************************/
+		--_rover_count;
+
+
+		std::cout
+			<< "[LC SLIDE]"
+			<< " removed_time="
+			<< std::setprecision(10)
+			<< t_0
+			<< " rover_count="
+			<< _rover_count
+			<< " node_count="
+			<< _all_gnss_node.size()
+			<< std::endl;
 	}
+	
 }
 
 void gfgomsf::t_gfgo_gins::_gins_posteriori_test(ceres::Problem& problem)
