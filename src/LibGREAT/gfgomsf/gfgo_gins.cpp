@@ -1566,163 +1566,380 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 	//marginalization
 	if (_rover_count == gins_window_size)
 	{
-		ceres::LossFunction* loss_function;
-		loss_function = new ceres::HuberLoss(_loss_func_value);
-		MarginalizationInfo* marginalization_info = new MarginalizationInfo();
-		if (_vDD_msg[_rover_count].size() > 1)
-		{
-			_gins_vector_to_double();
-			//marginalization prior
-			if (_last_marginalization_info && _last_marginalization_info->valid)
+		if (_msf_type == MSF_TYPE::GINS_TC_MODE) {
+			ceres::LossFunction* loss_function;
+			loss_function = new ceres::HuberLoss(_loss_func_value);
+			MarginalizationInfo* marginalization_info = new MarginalizationInfo();
+			if (_vDD_msg[_rover_count].size() > 1)
 			{
-				vector<int> drop_set;
-				vector<int> amb_margin = _amb_manager->getMarginAmb();
-				for (int i = 0; i < static_cast<int>(_last_marginalization_parameter_blocks.size()); i++)
+				_gins_vector_to_double();
+				//marginalization prior
+				if (_last_marginalization_info && _last_marginalization_info->valid)
 				{
-					if (_last_marginalization_parameter_blocks[i] == _para_pose[0] ||
-						_last_marginalization_parameter_blocks[i] == _para_speed_bias[0])
-						drop_set.push_back(i);
-
-					for (int j = 0; j < amb_margin.size(); j++)
+					vector<int> drop_set;
+					vector<int> amb_margin = _amb_manager->getMarginAmb();
+					for (int i = 0; i < static_cast<int>(_last_marginalization_parameter_blocks.size()); i++)
 					{
-						if (_last_marginalization_parameter_blocks[i] == _para_amb[amb_margin[j]])
+						if (_last_marginalization_parameter_blocks[i] == _para_pose[0] ||
+							_last_marginalization_parameter_blocks[i] == _para_speed_bias[0])
 							drop_set.push_back(i);
+
+						for (int j = 0; j < amb_margin.size(); j++)
+						{
+							if (_last_marginalization_parameter_blocks[i] == _para_amb[amb_margin[j]])
+								drop_set.push_back(i);
+						}
 					}
-				}
-				// construct new marginlization_factor
-				MarginalizationFactor* marginalization_factor = new MarginalizationFactor(_last_marginalization_info);
-				ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(marginalization_factor, NULL,
-					_last_marginalization_parameter_blocks,
-					drop_set);
-				marginalization_info->addResidualBlockInfo(residual_block_info);
-			}
-			//marginalization INS
-			if (_imu_enable)
-			{
-				if (_pre_integrations[1]->sum_dt <= _gtime_interval)
-				{
-					IMUFactor* imu_factor = new IMUFactor(_pre_integrations[1]);
-					ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(imu_factor, NULL,
-						vector<double*>{_para_pose[0], _para_speed_bias[0], _para_pose[1], _para_speed_bias[1]},
-						vector<int>{0, 1});
+					// construct new marginlization_factor
+					MarginalizationFactor* marginalization_factor = new MarginalizationFactor(_last_marginalization_info);
+					ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(marginalization_factor, NULL,
+						_last_marginalization_parameter_blocks,
+						drop_set);
 					marginalization_info->addResidualBlockInfo(residual_block_info);
 				}
-			}
-
-			////marginalization gnss
-			for (int i = 0; i <= _rover_count; i++)
-			{
-				if (i == 0)
+				//marginalization INS
+				if (_imu_enable)
 				{
-					vector<DDEquMsg> dd_msg = _vDD_msg[i];
-					t_gtime crt = dd_msg.begin()->time;
-					map<t_gtime, vector<t_gsatdata>>::const_iterator base_iter = _map_basedata.find(crt);
-					map<t_gtime, t_gallpar>::const_iterator param_iter = _map_param.find(crt);
-					if (base_iter == _map_basedata.end() || param_iter == _map_param.end())
-						continue;
-					for (auto& dd_iter : dd_msg)
+					if (_pre_integrations[1]->sum_dt <= _gtime_interval)
 					{
-						if (!_get_DD_data(dd_iter, base_iter->second)) continue;
-						pair<string, string> base_rover_site = make_pair(dd_iter.base_site, dd_iter.rover_site);
-						pair<FREQ_SEQ, GOBSBAND> freq_band = make_pair(dd_iter.freq, dd_iter.band);
-						vector<pair<t_gsatdata, t_gsatdata>> DD_sat_data;
-						DD_sat_data.push_back(make_pair(dd_iter.base_ref_sat, dd_iter.rover_ref_sat));
-						DD_sat_data.push_back(make_pair(dd_iter.base_nonref_sat, dd_iter.rover_nonref_sat));
-
-						GOBSTYPE  obstype = dd_iter.obs_type;
-						if (obstype == GOBSTYPE::TYPE_C)
-						{
-							PseudorangeDDINGFactor* pinsf = new PseudorangeDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
-							ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(pinsf, NULL, vector<double*>{_para_pose[0]}, vector<int>{0});
-							marginalization_info->addResidualBlockInfo(residual_block_info);
-						}
-						if (obstype == GOBSTYPE::TYPE_L)
-						{
-							int id1, id2;
-							id1 = _amb_manager->getAmbSearchIndex(make_pair(dd_iter.ref_sat_global_id, dd_iter.freq));
-							id2 = _amb_manager->getAmbSearchIndex(make_pair(dd_iter.nonref_sat_global_id, dd_iter.freq));
-							if (id1 == -1 || id2 == -1)
-								continue;
-							vector<int> drop_set{ 0 };
-							if (_amb_manager->getAmbStartRoverID(id1) == 0 && _amb_manager->getAmbStartRoverID(id2) == 0)
-							{
-								if (_amb_manager->getAmbEndRoverID(id1) == 0)
-									drop_set.push_back(1);
-								if (_amb_manager->getAmbEndRoverID(id2) == 0)
-									drop_set.push_back(2);
-
-								CarrierphaseDDINGFactor* linsf = new CarrierphaseDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
-								ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(linsf, NULL, vector<double*>{_para_pose[0], _para_amb[id1], _para_amb[id2]}, drop_set);
-								marginalization_info->addResidualBlockInfo(residual_block_info);
-							}
-						}
-					}
-				}
-			}
-
-			// static constraints
-			for (int i = 0; i <= _rover_count; i++)
-			{
-				if (i == 0)
-				{
-					vector<DDEquMsg> DD_tmp = _vDD_msg[i];
-					t_gtime crt = DD_tmp.begin()->time;
-					map<t_gtime, MOTION_TYPE>::const_iterator it = _map_motion.find(crt);
-					if (it->second == MOTION_TYPE::m_static)
-					{
-						for (it; it != _map_motion.begin(); --it)
-						{
-							if (it->second != MOTION_TYPE::m_static)
-							{
-								++it; break;
-							}
-						}
-						map<t_gtime, pair<Eigen::Vector3d, Eigen::Quaterniond>>::const_iterator it_pose = _map_pose.find(it->first);
-						Eigen::Vector3d pos = it_pose->second.first;
-						Eigen::Quaterniond quat = it_pose->second.second;
-						InitialPoseFactor* pose_factor = new InitialPoseFactor(pos, quat);
-						pose_factor->sqrt_info = 1e4 * Eigen::Matrix<double, 6, 6>::Identity();
-						//ceres::CostFunction* pose_factor = PoseError::Create(pos.x(), pos.y(), pos.z(),
-						//	quat.w(), quat.x(), quat.y(), quat.z(), 1e-6, 1e-9);
-						ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(pose_factor, NULL,
-							vector<double*>{_para_pose[0]}, vector<int>{0});
+						IMUFactor* imu_factor = new IMUFactor(_pre_integrations[1]);
+						ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(imu_factor, NULL,
+							vector<double*>{_para_pose[0], _para_speed_bias[0], _para_pose[1], _para_speed_bias[1]},
+							vector<int>{0, 1});
 						marginalization_info->addResidualBlockInfo(residual_block_info);
 					}
 				}
-			}
 
-			marginalization_info->preMarginalize();
-			// printf("pre marginalization %f ms\n", t_pre_margin.toc());
-			//TicToc t_margin;
-			marginalization_info->marginalize();
-			//printf("marginalization %f ms\n", t_margin.toc());
-			std::map<long, double*> addr_shift;
-			for (int i = 1; i <= _rover_count; i++)
-			{
-				addr_shift[reinterpret_cast<long>(_para_pose[i])] = _para_pose[i - 1];
-				if (_imu_enable)
-					addr_shift[reinterpret_cast<long>(_para_speed_bias[i])] = _para_speed_bias[i - 1];
-			}
-			//gnss 
-			vector<int> cur_amb = _amb_manager->getCurWinAmb();
-			for (int i = 0; i < cur_amb.size(); i++)
-			{
-				addr_shift[reinterpret_cast<long>(_para_amb[cur_amb[i]])] = _para_amb[cur_amb[i]];
-			}
+				////marginalization gnss
+				for (int i = 0; i <= _rover_count; i++)
+				{
+					if (i == 0)
+					{
+						vector<DDEquMsg> dd_msg = _vDD_msg[i];
+						t_gtime crt = dd_msg.begin()->time;
+						map<t_gtime, vector<t_gsatdata>>::const_iterator base_iter = _map_basedata.find(crt);
+						map<t_gtime, t_gallpar>::const_iterator param_iter = _map_param.find(crt);
+						if (base_iter == _map_basedata.end() || param_iter == _map_param.end())
+							continue;
+						for (auto& dd_iter : dd_msg)
+						{
+							if (!_get_DD_data(dd_iter, base_iter->second)) continue;
+							pair<string, string> base_rover_site = make_pair(dd_iter.base_site, dd_iter.rover_site);
+							pair<FREQ_SEQ, GOBSBAND> freq_band = make_pair(dd_iter.freq, dd_iter.band);
+							vector<pair<t_gsatdata, t_gsatdata>> DD_sat_data;
+							DD_sat_data.push_back(make_pair(dd_iter.base_ref_sat, dd_iter.rover_ref_sat));
+							DD_sat_data.push_back(make_pair(dd_iter.base_nonref_sat, dd_iter.rover_nonref_sat));
 
-			vector<double*> parameter_blocks = marginalization_info->getParameterBlocks(addr_shift); /// reserved parameters
-			_last_marginalization_parameter_blocks = parameter_blocks;
+							GOBSTYPE  obstype = dd_iter.obs_type;
+							if (obstype == GOBSTYPE::TYPE_C)
+							{
+								PseudorangeDDINGFactor* pinsf = new PseudorangeDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
+								ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(pinsf, NULL, vector<double*>{_para_pose[0]}, vector<int>{0});
+								marginalization_info->addResidualBlockInfo(residual_block_info);
+							}
+							if (obstype == GOBSTYPE::TYPE_L)
+							{
+								int id1, id2;
+								id1 = _amb_manager->getAmbSearchIndex(make_pair(dd_iter.ref_sat_global_id, dd_iter.freq));
+								id2 = _amb_manager->getAmbSearchIndex(make_pair(dd_iter.nonref_sat_global_id, dd_iter.freq));
+								if (id1 == -1 || id2 == -1)
+									continue;
+								vector<int> drop_set{ 0 };
+								if (_amb_manager->getAmbStartRoverID(id1) == 0 && _amb_manager->getAmbStartRoverID(id2) == 0)
+								{
+									if (_amb_manager->getAmbEndRoverID(id1) == 0)
+										drop_set.push_back(1);
+									if (_amb_manager->getAmbEndRoverID(id2) == 0)
+										drop_set.push_back(2);
+
+									CarrierphaseDDINGFactor* linsf = new CarrierphaseDDINGFactor(dd_iter.time, base_rover_site, param_iter->second, DD_sat_data, _gbias_model, freq_band, lever);
+									ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(linsf, NULL, vector<double*>{_para_pose[0], _para_amb[id1], _para_amb[id2]}, drop_set);
+									marginalization_info->addResidualBlockInfo(residual_block_info);
+								}
+							}
+						}
+					}
+				}
+
+				// static constraints
+				for (int i = 0; i <= _rover_count; i++)
+				{
+					if (i == 0)
+					{
+						vector<DDEquMsg> DD_tmp = _vDD_msg[i];
+						t_gtime crt = DD_tmp.begin()->time;
+						map<t_gtime, MOTION_TYPE>::const_iterator it = _map_motion.find(crt);
+						if (it->second == MOTION_TYPE::m_static)
+						{
+							for (it; it != _map_motion.begin(); --it)
+							{
+								if (it->second != MOTION_TYPE::m_static)
+								{
+									++it; break;
+								}
+							}
+							map<t_gtime, pair<Eigen::Vector3d, Eigen::Quaterniond>>::const_iterator it_pose = _map_pose.find(it->first);
+							Eigen::Vector3d pos = it_pose->second.first;
+							Eigen::Quaterniond quat = it_pose->second.second;
+							InitialPoseFactor* pose_factor = new InitialPoseFactor(pos, quat);
+							pose_factor->sqrt_info = 1e4 * Eigen::Matrix<double, 6, 6>::Identity();
+							//ceres::CostFunction* pose_factor = PoseError::Create(pos.x(), pos.y(), pos.z(),
+							//	quat.w(), quat.x(), quat.y(), quat.z(), 1e-6, 1e-9);
+							ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(pose_factor, NULL,
+								vector<double*>{_para_pose[0]}, vector<int>{0});
+							marginalization_info->addResidualBlockInfo(residual_block_info);
+						}
+					}
+				}
+
+				marginalization_info->preMarginalize();
+				// printf("pre marginalization %f ms\n", t_pre_margin.toc());
+				//TicToc t_margin;
+				marginalization_info->marginalize();
+				//printf("marginalization %f ms\n", t_margin.toc());
+				std::map<long, double*> addr_shift;
+				for (int i = 1; i <= _rover_count; i++)
+				{
+					addr_shift[reinterpret_cast<long>(_para_pose[i])] = _para_pose[i - 1];
+					if (_imu_enable)
+						addr_shift[reinterpret_cast<long>(_para_speed_bias[i])] = _para_speed_bias[i - 1];
+				}
+				//gnss 
+				vector<int> cur_amb = _amb_manager->getCurWinAmb();
+				for (int i = 0; i < cur_amb.size(); i++)
+				{
+					addr_shift[reinterpret_cast<long>(_para_amb[cur_amb[i]])] = _para_amb[cur_amb[i]];
+				}
+
+				vector<double*> parameter_blocks = marginalization_info->getParameterBlocks(addr_shift); /// reserved parameters
+				_last_marginalization_parameter_blocks = parameter_blocks;
+			}
+			if (_last_marginalization_info)
+				delete _last_marginalization_info;
+			_last_marginalization_info = marginalization_info;
+
+			if (_last_marginalization_info->factors.size() == 0)
+				_last_marginalization_info->valid = false;
+			_initial_prior = false;
 		}
-		if (_last_marginalization_info)
-			delete _last_marginalization_info;
-		_last_marginalization_info = marginalization_info;
+		else if(_msf_type==MSF_TYPE::GINS_LC_MODE){
+			/**************************************************************
+			* 1. Synchronize Eigen states to Ceres parameter arrays
+			**************************************************************/
+			_gins_vector_to_double();
 
-		if (_last_marginalization_info->factors.size() == 0)
-			_last_marginalization_info->valid = false;
-		_initial_prior = false;
+			/**************************************************************
+			 * 2. Create new marginalization container
+			 **************************************************************/
+			MarginalizationInfo* marginalization_info =
+				new MarginalizationInfo();
+
+			/**************************************************************
+			 * 3. Add previous marginalization prior
+			 **************************************************************/
+			if (_last_marginalization_info &&
+				_last_marginalization_info->valid)
+			{
+				vector<int> drop_set;
+
+				for (int i = 0;i < static_cast<int>(_last_marginalization_parameter_blocks.size());++i)
+				{
+					if (_last_marginalization_parameter_blocks[i]
+						== _para_pose[0] ||
+						_last_marginalization_parameter_blocks[i]
+						== _para_speed_bias[0])
+					{
+						drop_set.push_back(i);
+					}
+				}
+
+
+				MarginalizationFactor* marginalization_factor =
+					new MarginalizationFactor(
+						_last_marginalization_info);
+
+
+				ResidualBlockInfo* residual_block_info =
+					new ResidualBlockInfo(
+						marginalization_factor,
+						NULL,
+						_last_marginalization_parameter_blocks,
+						drop_set);
+
+				marginalization_info->addResidualBlockInfo(
+					residual_block_info);
+			}
+
+
+			/**************************************************************
+			 * 4. Add IMU factor between state 0 and state 1
+			 **************************************************************/
+			if (_imu_enable)
+			{
+				if (_pre_integrations[1] != nullptr &&
+					_pre_integrations[1]->sum_dt <= _gtime_interval)
+				{
+					IMUFactor* imu_factor =
+						new IMUFactor(
+							_pre_integrations[1]);
+
+
+					ResidualBlockInfo* residual_block_info =
+						new ResidualBlockInfo(
+							imu_factor,
+							NULL,
+							vector<double*>{
+							_para_pose[0],
+							_para_speed_bias[0],
+							_para_pose[1],
+							_para_speed_bias[1]
+							},
+							vector<int>{0,1});
+
+					marginalization_info->addResidualBlockInfo(residual_block_info);
+				}
+				else
+				{
+					std::cerr
+						<< "[LC MARG WARNING] "
+						<< "Invalid IMU pre-integration between node 0 and 1."
+						<< std::endl;
+				}
+			}
+
+
+			/**************************************************************
+			 * 5. Add RTK position factor belonging to oldest state X0
+			 **************************************************************/
+			const double oldest_time = _headers[0];
+
+
+			auto node_it =_all_gnss_node.find(oldest_time);
+
+
+			if (node_it != _all_gnss_node.end() &&node_it->second.has_lc_solution)
+			{
+				const t_gposdata::data_pos& lc_solution =node_it->second.lc_solution;
+
+				GnssPositionFactor* position_factor =
+					new GnssPositionFactor(
+						lc_solution.pos,
+						lc_solution.Rpos,
+						lever);
+
+				ResidualBlockInfo* residual_block_info =
+					new ResidualBlockInfo(
+						position_factor,
+						NULL,
+						vector<double*>{_para_pose[0]},
+						vector<int>{0});
+
+				marginalization_info->addResidualBlockInfo(residual_block_info);
+			}
+			else
+			{
+				std::cerr
+					<< "[LC MARG WARNING] "
+					<< "Cannot find valid RTK solution for oldest node: "
+					<< std::setprecision(10)
+					<< oldest_time
+					<< std::endl;
+			}
+
+
+			/**************************************************************
+			 * 6. Perform marginalization
+			 **************************************************************/
+			if (!marginalization_info->factors.empty())
+			{
+				marginalization_info->preMarginalize();
+
+				marginalization_info->marginalize();
+			}
+			else
+			{
+				marginalization_info->valid = false;
+
+				std::cerr
+					<< "[LC MARG WARNING] "
+					<< "No factor available for marginalization."
+					<< std::endl;
+			}
+
+
+			/**************************************************************
+			 * 7. Shift parameter addresses
+			 **************************************************************/
+			std::map<long, double*> addr_shift;
+
+
+			for (int i = 1; i <= _rover_count; ++i)
+			{
+				addr_shift[reinterpret_cast<long>(_para_pose[i])] =_para_pose[i - 1];
+
+				if (_imu_enable)
+				{
+					addr_shift[reinterpret_cast<long>(_para_speed_bias[i])] =_para_speed_bias[i - 1];
+				}
+			}
+
+
+			/**************************************************************
+			 * 8. Obtain parameter blocks retained in new prior
+			 **************************************************************/
+			if (marginalization_info->valid && marginalization_info->n > 0)
+			{
+				_last_marginalization_parameter_blocks =
+					marginalization_info->getParameterBlocks(addr_shift);
+			}
+			else
+			{
+				marginalization_info->valid = false;
+
+				_last_marginalization_parameter_blocks.clear();
+			}
+
+
+			/**************************************************************
+			 * 9. Replace old prior with new prior
+			 **************************************************************/
+			if (_last_marginalization_info)
+			{
+				delete _last_marginalization_info;
+
+				_last_marginalization_info = nullptr;
+			}
+
+
+			_last_marginalization_info =
+				marginalization_info;
+
+
+			_initial_prior = false;
+
+
+			/**************************************************************
+			 * 10. Debug information
+			 **************************************************************/
+			std::cout
+				<< "[LC MARG]"
+				<< " marginalized_time="
+				<< std::setprecision(10)
+				<< oldest_time
+				<< " factors="
+				<< marginalization_info->factors.size()
+				<< " m="
+				<< marginalization_info->m
+				<< " n="
+				<< marginalization_info->n
+				<< " keep_blocks="
+				<< _last_marginalization_parameter_blocks.size()
+				<< " valid="
+				<< marginalization_info->valid
+				<< std::endl;
+		}
 	}
 }
-
 
 void gfgomsf::t_gfgo_gins::_slide_gins()
 {
