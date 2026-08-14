@@ -746,8 +746,6 @@ int gfgomsf::t_gfgo_gins::_gins_processing()
 
 				// RTK position factors + IMU factors
 				_gins_optimization();
-
-
 				if (_opt_valid)
 				{
 					_solver_flag = NON_LINEAR;
@@ -756,6 +754,7 @@ int gfgomsf::t_gfgo_gins::_gins_processing()
 						<< "[LC OPT] First LC window optimization finished."
 						<< std::endl;
 				}
+				_slide_gins();
 			}
 
 			_c_gnss_factor = false;
