@@ -749,9 +749,16 @@ int gfgomsf::t_gfgo_gins::_gins_processing()
 				if (_opt_valid)
 				{
 					_solver_flag = NON_LINEAR;
-
+					_gins_marginalization();
 					std::cout
 						<< "[LC OPT] First LC window optimization finished."
+						<< std::endl;
+				}
+				else 
+				{
+					std::cerr
+						<< "[LC MARG WARNING] "
+						<< "Skip marginalization because LC optimization failed."
 						<< std::endl;
 				}
 				_slide_gins();
@@ -800,43 +807,75 @@ int gfgomsf::t_gfgo_gins::_gins_processing()
 
 void gfgomsf::t_gfgo_gins::_gins_feedback()
 {
-	if (_solver_flag == NON_LINEAR)
+	if (_msf_type == MSF_TYPE::GINS_TC_MODE) 
 	{
-		t_gposdata::data_pos pos;
-		_get_result(_imu_crt, pos);
-
-		cout << _imu_crt.str_hms() << _gnss_crt.str_hms() << _epoch.str_hms() << endl;
-		cout << pos.pos.transpose() << endl;
-		cout << _Ps[_rover_count].transpose() << endl;
-
-		MEAS_TYPE meas_type = meas_state();
-
-		Eigen::Vector3d mean_ba = _Bas[_rover_count];
-		Eigen::Vector3d mean_bg = _Bgs[_rover_count];
-		Eigen::Quaterniond e_q = Eigen::Quaterniond(_Rs[_rover_count]);
-		e_q.normalized();
-		sins.qeb = t_gquat(e_q.w(), e_q.x(), e_q.y(), e_q.z());
-		sins.Ceb = t_gbase::q2mat(sins.qeb);
-		sins.ve = _Vs[_rover_count];
-		sins.pos_ecef = _Ps[_rover_count];
-		if (_msf_type == MSF_TYPE::GINS_TC_MODE)
+		if (_solver_flag == NON_LINEAR)
 		{
-			Eigen::Vector3d robustpos;
+			t_gposdata::data_pos pos;
+			_get_result(_imu_crt, pos);
 
+			cout << _imu_crt.str_hms() << _gnss_crt.str_hms() << _epoch.str_hms() << endl;
+			cout << pos.pos.transpose() << endl;
+			cout << _Ps[_rover_count].transpose() << endl;
+
+			MEAS_TYPE meas_type = meas_state();
+
+			Eigen::Vector3d mean_ba = _Bas[_rover_count];
+			Eigen::Vector3d mean_bg = _Bgs[_rover_count];
+			Eigen::Quaterniond e_q = Eigen::Quaterniond(_Rs[_rover_count]);
+			e_q.normalized();
+			sins.qeb = t_gquat(e_q.w(), e_q.x(), e_q.y(), e_q.z());
+			sins.Ceb = t_gbase::q2mat(sins.qeb);
+			sins.ve = _Vs[_rover_count];
+			sins.pos_ecef = _Ps[_rover_count];
+			Eigen::Vector3d robustpos;
 			if (_getRobustFixedPosition(robustpos))
 				sins.pos_ecef = robustpos;
-		}
-		//sins.pos_ecef = pos.pos;
-		sins.eb = mean_bg;
-		sins.db = mean_ba;
-		sins.qnb = t_gbase::m2qua(sins.eth.Cne) * sins.qeb;
-		sins.Cnb = t_gbase::q2mat(sins.qnb);
-		sins.vn = sins.eth.Cne * sins.ve;
-		sins.pos = Cart2Geod(sins.pos_ecef, false);
-		sins.att = t_gbase::q2att(sins.qnb);
-		sins.xyz_out = pos.pos;
+			//sins.pos_ecef = pos.pos;
+			sins.eb = mean_bg;
+			sins.db = mean_ba;
+			sins.qnb = t_gbase::m2qua(sins.eth.Cne) * sins.qeb;
+			sins.Cnb = t_gbase::q2mat(sins.qnb);
+			sins.vn = sins.eth.Cne * sins.ve;
+			sins.pos = Cart2Geod(sins.pos_ecef, false);
+			sins.att = t_gbase::q2att(sins.qnb);
+			sins.xyz_out = pos.pos;
 
+		}
 	}
+	else if (_msf_type == MSF_TYPE::GINS_LC_MODE)
+	{
+		if (_solver_flag == NON_LINEAR)
+		{
+			t_gposdata::data_pos pos;
+			_get_result(_imu_crt, pos);
+
+			cout << _imu_crt.str_hms() << _gnss_crt.str_hms() << _epoch.str_hms() << endl;
+			cout << pos.pos.transpose() << endl;
+			cout << _Ps[_rover_count].transpose() << endl;
+
+			MEAS_TYPE meas_type = meas_state();
+
+			Eigen::Vector3d mean_ba = _Bas[_rover_count];
+			Eigen::Vector3d mean_bg = _Bgs[_rover_count];
+			Eigen::Quaterniond e_q = Eigen::Quaterniond(_Rs[_rover_count]);
+			e_q.normalized();
+			sins.qeb = t_gquat(e_q.w(), e_q.x(), e_q.y(), e_q.z());
+			sins.Ceb = t_gbase::q2mat(sins.qeb);
+			sins.ve = _Vs[_rover_count];
+			sins.pos_ecef = _Ps[_rover_count];
+			//sins.pos_ecef = pos.pos;
+			sins.eb = mean_bg;
+			sins.db = mean_ba;
+			sins.qnb = t_gbase::m2qua(sins.eth.Cne) * sins.qeb;
+			sins.Cnb = t_gbase::q2mat(sins.qnb);
+			sins.vn = sins.eth.Cne * sins.ve;
+			sins.pos = Cart2Geod(sins.pos_ecef, false);
+			sins.att = t_gbase::q2att(sins.qnb);
+			sins.xyz_out = sins.pos_ecef;
+		}
+	}
+	
 }
 
 void gfgomsf::t_gfgo_gins::_gravity_update()

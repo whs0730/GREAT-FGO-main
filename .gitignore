@@ -11,10 +11,11 @@ build_Windows/
 *.dll
 *.exe
 *.ins
-
+*.zip
 # Runtime results
 result/
-
+result_TC/
+result_LC/
 # IDE
 .idea/
 
