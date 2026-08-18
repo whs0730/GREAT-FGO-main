@@ -172,19 +172,16 @@ int main(int argc, char** argv)
 			// Put the gcoder into the gio
 			// Note, gcoder contain the gdata and gio contain the gcoder
 			tgio->coder(tgcoder);
-
-			
-			
-				runepoch = t_gtime::current_time(t_gtime::GPS);
-				// Read the data from file here
-				tgio->run_read();
-				lstepoch = t_gtime::current_time(t_gtime::GPS);
-				// Write the information of reading process to log file
-				SPDLOG_LOGGER_INFO(my_logger, "main", "READ: " + path + " time: "
-					+ dbl2str(lstepoch.diff(runepoch)) + " sec");
-				// Delete 
-				delete tgio;
-				delete tgcoder;
+			runepoch = t_gtime::current_time(t_gtime::GPS);
+			// Read the data from file here
+			tgio->run_read();
+			lstepoch = t_gtime::current_time(t_gtime::GPS);
+			// Write the information of reading process to log file
+			SPDLOG_LOGGER_INFO(my_logger, "main", "READ: " + path + " time: "
+				+ dbl2str(lstepoch.diff(runepoch)) + " sec");
+			// Delete 
+			delete tgio;
+			delete tgcoder;
 			
 		}
 	}
