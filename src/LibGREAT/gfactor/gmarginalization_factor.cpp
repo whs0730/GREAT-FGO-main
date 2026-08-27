@@ -213,7 +213,17 @@ namespace gfgo
 			printf("unstable tracking...\n");
 			return;
 		}
-
+		if (n == 0)
+		{
+			valid = false;
+			std::cerr
+				<< "[MARG] no retained parameter, "
+				<< "m = " << m
+				<< ", n = " << n
+				<< ", skip marginalization."
+				<< std::endl;
+			return;
+		}
 		t_tictoc t_summing;
 		Eigen::MatrixXd A(pos, pos);
 		Eigen::VectorXd b(pos);

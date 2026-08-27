@@ -35,16 +35,16 @@ import matplotlib.pyplot as plt
 # 只需要修改这里，其他代码一般不用动。
 
 # GREAT-FGO 输出的 .ins 文件
-RESULT_FILE = r"D:\GREAT-FGO-main\sample_data\Data05_20201128_HG4930_Vehicle_Opensky\result\Vehicle_Opensky_TC.ins"
+RESULT_FILE = r"D:\GREAT-FGO-main\sample_data\FGO_20211012\result\SEPT-RTK-TCI-ADIS-FGO-LC.ins"
 
 # ROVE 真值文件
-TRUTH_FILE = r"D:\GREAT-FGO-main\sample_data\Data05_20201128_HG4930_Vehicle_Opensky\HG4930_GroundTruth.txt"
+TRUTH_FILE = r"D:\GREAT-FGO-main\sample_data\FGO_20211012\ref\groundtruth_1012_ADIS.txt"
 
 # 本次结果名称：松耦合写 "LC"，紧耦合写 "TC"
 LABEL = "LC"
 
 # 输出目录
-OUTPUT_DIR = r"D:\GREAT-FGO-main\plot\result_TC"
+OUTPUT_DIR = r"D:\GREAT-FGO-main\plot\result_LC(1)"
 
 
 # ---------- 可选设置 ----------

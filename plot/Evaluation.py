@@ -7,9 +7,9 @@ from plot import plot_position_errors, plot_velocity_errors, plot_attitude_error
 
 def main():
     # Parameter settings
-    file_data = r'..\sample_data\FGO_20250928\result\SEPT-RTK.fgo'
-    file_ref = r'..\sample_data\FGO_20250928\ref\groundtruth_0928_GNSS.txt'
-    output_dir = r'.\results\20250928'
+    file_data = r"D:\GREAT-FGO-main\sample_data\FGO_20211012\result\SEPT-RTK-TCI-ADIS-FGO-TC.ins"
+    file_ref = r"D:\GREAT-FGO-main\sample_data\FGO_20211012\ref\groundtruth_1012_ADIS.txt"
+    output_dir = r'.\results\TC'
 
     # Create output directory
     Path(output_dir).mkdir(parents=True, exist_ok=True)
