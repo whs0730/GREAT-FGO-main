@@ -678,8 +678,7 @@ int gfgomsf::t_gfgo_gins::_gnss_processing()
 				_c_gnss_factor = false;
 				return -1;
 			}
-
-			++_rover_count;
+			_set_initial_value(_gnss_crt);
 			_current_lc_solution = posdata;
 			std::cout << "[LC RTK] "
 				<< "time: " << posdata.t
@@ -2402,102 +2401,181 @@ void gfgomsf::t_gfgo_gins::_get_initial_value(const t_gtime& runEpoch)
 }
 void gfgomsf::t_gfgo_gins::_set_initial_value(const t_gtime& runEpoch)
 {
-	_rover_count++;
-	if (_rover_count >= 1)
+	if (_msf_type == MSF_TYPE::GINS_TC_MODE) 
 	{
-		if (_msf_type == MSF_TYPE::GINS_TC_MODE)
+		_rover_count++;
+		if (_rover_count >= 1)
 		{
-			double time_gap = runEpoch.sow() - _last_pre_integration_time;
-			//detect time gap
-			if (time_gap > _gtime_interval)
+			if (_msf_type == MSF_TYPE::GINS_TC_MODE)
 			{
-				cout << "[" << _last_pre_integration_time << "]--" << "[" << runEpoch.sow() << "]" << ":gnss time gap !!!]" << endl;
-				clearGNSSmsg();
-				_rover_count++;
-				_last_pre_integration_time = -1;
-				while (!_accBuf.empty())
+				double time_gap = runEpoch.sow() - _last_pre_integration_time;
+				//detect time gap
+				if (time_gap > _gtime_interval)
 				{
-					_accBuf.pop();
-					_gyrBuf.pop();
+					cout << "[" << _last_pre_integration_time << "]--" << "[" << runEpoch.sow() << "]" << ":gnss time gap !!!]" << endl;
+					clearGNSSmsg();
+					_rover_count++;
+					_last_pre_integration_time = -1;
+					while (!_accBuf.empty())
+					{
+						_accBuf.pop();
+						_gyrBuf.pop();
+					}
+					if (_last_gnss_marginalization_info)
+						_last_marginalization_info->valid = false;
 				}
-				if (_last_gnss_marginalization_info)
-					_last_marginalization_info->valid = false;
 			}
 		}
-	}
-	t_gallpar params_add;
-	_gtemp_params(_param, params_add);
-	_map_basedata.insert(make_pair(runEpoch, _data_base));
-	_map_param.insert(make_pair(runEpoch, params_add));
-	//_rover_window[_rover_count]->setSatData(_data);
-	vector<string> cur_sat_list;
-	for (auto it : _data) cur_sat_list.push_back(it.sat());
+		t_gallpar params_add;
+		_gtemp_params(_param, params_add);
+		_map_basedata.insert(make_pair(runEpoch, _data_base));
+		_map_param.insert(make_pair(runEpoch, params_add));
+		//_rover_window[_rover_count]->setSatData(_data);
+		vector<string> cur_sat_list;
+		for (auto it : _data) cur_sat_list.push_back(it.sat());
 
-	if (_rover_count >= 1 && cur_sat_prn.empty())
-		cout << "Refill current satellite list !" << endl;
+		if (_rover_count >= 1 && cur_sat_prn.empty())
+			cout << "Refill current satellite list !" << endl;
 
-	map<string, int>::iterator iter_cur_prn = cur_sat_prn.begin();  
-	for (; iter_cur_prn != cur_sat_prn.end();)
-	{
-		string sat = iter_cur_prn->first;
-		auto it_find = find_if(cur_sat_list.begin(), cur_sat_list.end(), [sat](const string& sat_name)
+		map<string, int>::iterator iter_cur_prn = cur_sat_prn.begin();
+		for (; iter_cur_prn != cur_sat_prn.end();)
 		{
-			return sat_name == sat;
-		});
-		if (it_find == cur_sat_list.end())  
-		{
-			iter_cur_prn = cur_sat_prn.erase(iter_cur_prn);
-			cout << "the sat : " << sat << " lost tracking !" << endl;
-		}
-		else
-			iter_cur_prn++;
-	}
-
-	for (auto it : _data)
-	{
-		string sat_name = it.sat();
-		auto it_find = cur_sat_prn.find(sat_name);
-		if (it_find == cur_sat_prn.end()) 
-		{
-			_global_sat_id++;
-			cur_sat_prn[sat_name] = _global_sat_id;
-			_amb_manager->addNewSat(runEpoch, _rover_count, _global_sat_id, _global_amb_id, it, _param);
-		}
-		else
-		{
-			if (it.islip())
+			string sat = iter_cur_prn->first;
+			auto it_find = find_if(cur_sat_list.begin(), cur_sat_list.end(), [sat](const string& sat_name)
+				{
+					return sat_name == sat;
+				});
+			if (it_find == cur_sat_list.end())
 			{
-				cur_sat_prn.erase(sat_name);
+				iter_cur_prn = cur_sat_prn.erase(iter_cur_prn);
+				cout << "the sat : " << sat << " lost tracking !" << endl;
+			}
+			else
+				iter_cur_prn++;
+		}
+
+		for (auto it : _data)
+		{
+			string sat_name = it.sat();
+			auto it_find = cur_sat_prn.find(sat_name);
+			if (it_find == cur_sat_prn.end())
+			{
 				_global_sat_id++;
 				cur_sat_prn[sat_name] = _global_sat_id;
 				_amb_manager->addNewSat(runEpoch, _rover_count, _global_sat_id, _global_amb_id, it, _param);
 			}
 			else
-				_amb_manager->addRover(_epoch.sow(), sat_name, _rover_count);
+			{
+				if (it.islip())
+				{
+					cur_sat_prn.erase(sat_name);
+					_global_sat_id++;
+					cur_sat_prn[sat_name] = _global_sat_id;
+					_amb_manager->addNewSat(runEpoch, _rover_count, _global_sat_id, _global_amb_id, it, _param);
+				}
+				else
+					_amb_manager->addRover(_epoch.sow(), sat_name, _rover_count);
 
+			}
+
+		}
+		_amb_manager->get_last_epoch_sats(_epoch.sow());
+		assert(cur_sat_prn.size() == _data.size());
+	}
+	else if (_msf_type == MSF_TYPE::GINS_LC_MODE)
+	{
+		_rover_count++;
+		if (_rover_count >= 1 &&_last_pre_integration_time >= 0.0)
+		{
+			double time_gap =runEpoch.sow() - _last_pre_integration_time;
+			if (time_gap > _gtime_interval)
+			{
+				std::cout
+					<< "[GINS GAP] mode="
+					<< "LC"
+					<< " last=" << _last_pre_integration_time
+					<< " current=" << runEpoch.sow()
+					<< " gap=" << time_gap
+					<< " limit=" << _gtime_interval
+					<< std::endl;
+				clearGNSSmsg();
+				++_rover_count;
+				_last_pre_integration_time = -1.0;
+
+				while (!_accBuf.empty())
+				{
+					_accBuf.pop();
+					_gyrBuf.pop();
+				}
+				if (_last_marginalization_info)
+				{
+					_last_marginalization_info->valid = false;
+				}
+			}
 		}
 
 	}
-	_amb_manager->get_last_epoch_sats(_epoch.sow());
-	assert(cur_sat_prn.size() == _data.size());
 }
 
 
 void gfgomsf::t_gfgo_gins::clearGNSSmsg()
 {
-	if (_last_gnss_info != nullptr)
-		delete _last_gnss_info;
-	_last_gnss_info = nullptr;
-	cur_sat_prn.clear();
-	_DD_msg.clear();
-	_vDD_msg.clear();
-	_amb_manager->clearState();
-	_rover_count = -1;
-	_global_sat_id = -1;
-	_global_amb_id = -1;
-	_amb_state = false;
-	memset(_para_amb, 0, sizeof(_para_amb));
-	_initial_prior = true;
+	if (_msf_type == MSF_TYPE::GINS_TC_MODE) 
+	{
+		if (_last_gnss_info != nullptr)
+			delete _last_gnss_info;
+		_last_gnss_info = nullptr;
+		cur_sat_prn.clear();
+		_DD_msg.clear();
+		_vDD_msg.clear();
+		_amb_manager->clearState();
+		_rover_count = -1;
+		_global_sat_id = -1;
+		_global_amb_id = -1;
+		_amb_state = false;
+		memset(_para_amb, 0, sizeof(_para_amb));
+		_initial_prior = true;
+	}
+	else if(_msf_type==MSF_TYPE::GINS_LC_MODE)
+	{
+		for (auto& node : _all_gnss_node)
+		{
+			if (node.second.pre_integration != nullptr)
+			{
+				delete node.second.pre_integration;
+				node.second.pre_integration = nullptr;
+			}
+		}
+		_all_gnss_node.clear();
+		for (int i = 0; i <= WINDOW_SIZE; ++i)
+		{
+			if (_pre_integrations[i] != nullptr)
+			{
+				delete _pre_integrations[i];
+				_pre_integrations[i] = nullptr;
+			}
+			_dt_buf[i].clear();
+			_linear_acceleration_buf[i].clear();
+			_angular_velocity_buf[i].clear();
+		}
+		if (_tmp_pre_integration != nullptr)
+		{
+			delete _tmp_pre_integration;
+			_tmp_pre_integration = nullptr;
+		}
+		if (_last_marginalization_info != nullptr)
+		{
+			delete _last_marginalization_info;
+			_last_marginalization_info = nullptr;
+		}
+		_last_marginalization_parameter_blocks.clear();
+		_rover_count = -1;
+		_initial_prior = true;
+		_solver_flag = INITIAL;
+		_opt_valid = 0;
+		_opt_flag = false;
+		_first_imu = false;
+	}
 }
 
 void gfgomsf::t_gfgo_gins::write(string info)
