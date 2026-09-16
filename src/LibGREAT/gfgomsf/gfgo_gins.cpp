@@ -1227,21 +1227,18 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 		{
 			count++;
 
-			/**********************************************************************
-			 * 1. Convert state vectors to Ceres parameter arrays
-			 **********************************************************************/
+
+			//Convert state vectors to Ceres parameter arrays
+
 			_gins_vector_to_double();
 
 
-			/**********************************************************************
-			 * 2. Construct Ceres problem
-			 **********************************************************************/
+
+			//Construct Ceres problem
 			ceres::Problem problem;
 
 
-			/**********************************************************************
-			 * 3. Add state parameter blocks
-			 **********************************************************************/
+			 //3. Add state parameter blocks
 			for (int i = 0; i <= _rover_count; i++)
 			{
 				// Pose:
@@ -1264,12 +1261,6 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 					);
 				}
 
-
-				/******************************************************************
-				 * Very weak pose prior
-				 *
-				 * Mainly used to prevent numerical singularity.
-				 ******************************************************************/
 				Eigen::Vector3d pos(
 					_para_pose[i][0],
 					_para_pose[i][1],
@@ -1296,9 +1287,6 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 				);
 
 
-				/******************************************************************
-				 * Very weak velocity/bias prior
-				 ******************************************************************/
 				InitialVelBiasFactor* initial_bias =
 					new InitialVelBiasFactor(
 						Eigen::Vector3d(
@@ -1329,9 +1317,8 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 			}
 
 
-			/**********************************************************************
-			 * 4. Marginalization prior
-			 **********************************************************************/
+			//Marginalization prior
+
 			if (_last_marginalization_info &&
 				_last_marginalization_info->valid)
 			{
@@ -1348,14 +1335,9 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 			}
 
 
-			/**********************************************************************
-			 * 5. IMU pre-integration factors
-			 *
-			 * Shared by LC and TC.
-			 *
-			 *      Xi -------- IMU -------- Xj
-			 *
-			 **********************************************************************/
+	
+			//IMU pre-integration factors
+
 			if (_imu_enable && _rover_count > 0)
 			{
 				for (int i = 0; i < _rover_count; i++)
@@ -1384,38 +1366,16 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 			}
 
 
-			/**********************************************************************
-			 * 6. GNSS factors
-			 *
-			 * LC:
-			 *
-			 *      RTK position
-			 *           |
-			 *      PositionFactor
-			 *           |
-			 *           Xi
-			 *
-			 *
-			 * TC:
-			 *
-			 *      pseudorange / carrier phase DD
-			 *                    |
-			 *                 GNSS Factor
-			 *                    |
-			 *                    Xi
-			 *
-			 **********************************************************************/
-			 /******************************************************************
-			  * 8.1 Loosely coupled RTK position factors
-			  ******************************************************************/
+			//GNSS factors
+
 			int lc_factor_count = 0;
 
 			for (int i = 0; i <= _rover_count; ++i)
 			{
-				// _headers[i] is the epoch corresponding to _para_pose[i]
+				
 				double node_time = _headers[i];
 
-				// Find RTK solution corresponding to this state node
+				// Find RTK solution 
 				auto node_it =
 					_all_gnss_node.find(node_time);
 
@@ -1446,17 +1406,8 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 					node_it->second.lc_solution;
 
 
-				/**************************************************************
-				 * Position residual:
-				 *
-				 * r =
-				 * sqrt_info *
-				 * (
-				 *     P_IMU
-				 *   + R_EB * lever
-				 *   - P_RTK
-				 * )
-				 **************************************************************/
+				//Position residual:
+
 				GnssPositionFactor* position_factor =
 					new GnssPositionFactor(
 						lc_solution.pos,
@@ -1465,9 +1416,6 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 					);
 
 
-				/**************************************************************
-				 * Connect GNSS position factor to pose state i
-				 **************************************************************/
 				problem.AddResidualBlock(
 					position_factor,
 					NULL,
@@ -1503,9 +1451,9 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 
 				break;
 			}
-			/**********************************************************************
-			 * 10. Ceres optimization
-			 **********************************************************************/
+
+			//Ceres optimization
+
 			ceres::Solver::Options options;
 
 			options.linear_solver_type =
@@ -1531,10 +1479,8 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 				<< summary.BriefReport()
 				<< std::endl;
 
+			//Check loosely coupled optimization result
 
-			/**********************************************************************
-			 * 11. Check loosely coupled optimization result
-			**********************************************************************/
 			if (summary.IsSolutionUsable())
 			{
 				_opt_valid = 1;
@@ -1550,9 +1496,8 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 			iter_flag = false;
 
 		} while (iter_flag);
-		/**********************************************************************
-		* Write optimized result back
-		**********************************************************************/
+
+		//Write optimized result back
 		std::cout
 			<< "[LC OPT] Epoch: "
 			<< _cur_node_time
@@ -1761,20 +1706,18 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			_initial_prior = false;
 		}
 		else if(_msf_type==MSF_TYPE::GINS_LC_MODE){
-			/**************************************************************
-			* 1. Synchronize Eigen states to Ceres parameter arrays
-			**************************************************************/
+			//Synchronize Eigen states
 			_gins_vector_to_double();
 
-			/**************************************************************
-			 * 2. Create new marginalization container
-			 **************************************************************/
+
+			 //Create new marginalization container
+
 			MarginalizationInfo* marginalization_info =
 				new MarginalizationInfo();
 
-			/**************************************************************
-			 * 3. Add previous marginalization prior
-			 **************************************************************/
+
+			 //Add previous marginalization prior
+
 			if (_last_marginalization_info &&
 				_last_marginalization_info->valid)
 			{
@@ -1809,9 +1752,7 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			}
 
 
-			/**************************************************************
-			 * 4. Add IMU factor between state 0 and state 1
-			 **************************************************************/
+			 //Add IMU factor between state 0 and state 1
 			if (_imu_enable)
 			{
 				if (_pre_integrations[1] != nullptr &&
@@ -1846,9 +1787,9 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			}
 
 
-			/**************************************************************
-			 * 5. Add RTK position factor belonging to oldest state X0
-			 **************************************************************/
+
+			 //Add RTK position factor belonging to oldest state X0
+
 			const double oldest_time = _headers[0];
 
 
@@ -1885,9 +1826,9 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			}
 
 
-			/**************************************************************
-			 * 6. Perform marginalization
-			 **************************************************************/
+
+			//Perform marginalization
+
 			if (!marginalization_info->factors.empty())
 			{
 				marginalization_info->preMarginalize();
@@ -1905,9 +1846,8 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			}
 
 
-			/**************************************************************
-			 * 7. Shift parameter addresses
-			 **************************************************************/
+			//Shift parameter addresses
+
 			std::map<long, double*> addr_shift;
 
 
@@ -1922,9 +1862,9 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			}
 
 
-			/**************************************************************
-			 * 8. Obtain parameter blocks retained in new prior
-			 **************************************************************/
+
+			 //Obtain parameter blocks retained in new prior
+
 			if (marginalization_info->valid && marginalization_info->n > 0)
 			{
 				_last_marginalization_parameter_blocks =
@@ -1938,9 +1878,9 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			}
 
 
-			/**************************************************************
-			 * 9. Replace old prior with new prior
-			 **************************************************************/
+
+			//Replace old prior with new prior
+	
 			if (_last_marginalization_info)
 			{
 				delete _last_marginalization_info;
@@ -1956,9 +1896,9 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			_initial_prior = false;
 
 
-			/**************************************************************
-			 * 10. Debug information
-			 **************************************************************/
+
+
+
 			std::cout
 				<< "[LC MARG]"
 				<< " marginalized_time="
@@ -2041,9 +1981,7 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 	}
 	else if (_msf_type == MSF_TYPE::GINS_LC_MODE) {
 		const int old_rover_count = _rover_count;
-		/******************************************************************
-		 * 1. Shift states one slot to the left
-		 ******************************************************************/
+		//Shift states
 		for (int i = 0; i < old_rover_count; ++i)
 		{
 			_headers[i] = _headers[i + 1];
@@ -2053,9 +1991,9 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 
 			if (_imu_enable)
 			{
-			/**********************************************************
-			* Pre-integration indexing:
-			**********************************************************/
+
+			//Pre-integration indexing:
+
 				std::swap(
 					_pre_integrations[i],
 					_pre_integrations[i + 1]
@@ -2080,9 +2018,8 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 		}
 
 
-		/******************************************************************
-		 * 2. Prepare the free slot for the next IMU pre-integration
-		 ******************************************************************/
+		 //Prepare the free slot for the next IMU pre-integration
+
 		if (_imu_enable)
 		{
 			// After the state shift, the newest retained state is here
@@ -2112,9 +2049,7 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 			_linear_acceleration_buf[old_rover_count].clear();
 
 			_angular_velocity_buf[old_rover_count].clear();
-			/**************************************************************
-			 * _tmp_pre_integration is used to accumulate the interval
-			 **************************************************************/
+
 			if (_tmp_pre_integration != nullptr)
 			{
 				delete _tmp_pre_integration;
@@ -2137,9 +2072,7 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 				_gravity
 			);
 		}
-		/******************************************************************
-		 * 3. Remove the oldest GNSS/RTK node
-		 ******************************************************************/
+		// 3. Remove the oldest GNSS/RTK node
 		auto old_node =
 			_all_gnss_node.find(t_0);
 
@@ -2161,9 +2094,7 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 				<< t_0
 				<< std::endl;
 		}
-		/******************************************************************
-		 * 4. Release one state slot
-		 ******************************************************************/
+		// 4. Release one state slot
 		--_rover_count;
 
 
