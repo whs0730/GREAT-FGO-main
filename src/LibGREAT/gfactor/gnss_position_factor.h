@@ -17,13 +17,13 @@ namespace gfgo
 	{
     private:
 
-        /// GNSS antenna position in ECEF
+        /// GNSS antenna position
         Eigen::Vector3d _gnss_position;
 
         /// Position square-root information matrix
         Eigen::Matrix3d _sqrt_info;
 
-        /// IMU-GNSS lever arm in body frame
+        /// IMU-GNSS lever arm
         Eigen::Vector3d _lever_arm;
 	public:
         GnssPositionFactor(const Eigen::Vector3d& gnss_position, const Eigen::Vector3d& position_variance, const Eigen::Vector3d& lever_arm) 

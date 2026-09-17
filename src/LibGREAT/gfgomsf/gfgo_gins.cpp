@@ -1238,7 +1238,7 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 			ceres::Problem problem;
 
 
-			 //3. Add state parameter blocks
+			 //Add state parameter blocks
 			for (int i = 0; i <= _rover_count; i++)
 			{
 				// Pose:
