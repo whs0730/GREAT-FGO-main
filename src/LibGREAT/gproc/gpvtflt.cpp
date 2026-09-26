@@ -134,7 +134,7 @@ great::t_gpvtflt::t_gpvtflt(string mark, string mark_base, t_gsetbase *gset, t_s
     _max_res_norm = dynamic_cast<t_gsetproc*>(_set)->max_res_norm();
     _minsat = dynamic_cast<t_gsetproc*>(_set)->minsat();
     _isBase = false;
-    //_pos_constrain = false;
+    _pos_constrain = false;
     if (!_site_base.empty())
         _isBase = true;
     if (_isBase)
