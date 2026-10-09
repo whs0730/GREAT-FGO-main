@@ -29,7 +29,8 @@ namespace gfgomsf
 		VIL_SLAM_MODE,	///< only VILO mode
 		GVIL_LC_MODE,	///< GNSS/VILO Loosely combination mode
 		GVIL_TC_MODE,	///< GNSS/VILO tightly combination mode
-		GINS_LC_MODE    ///< GNSS/INS loosely coupled mode
+		GINS_LC_MODE,    ///< GNSS/INS loosely coupled mode
+		GINS_CT_MODE	///Continuous-Time estimation mode
 	};
 
 	/** @brief class enum of GNSS position type. */

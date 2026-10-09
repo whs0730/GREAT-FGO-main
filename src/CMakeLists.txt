@@ -25,9 +25,12 @@ message(STATUS " It is written in standard C++. GREAT-FGO supports multi-frequen
 message(STATUS " ====================================================================================================================== ")
 
 # compiler setting
-include(CheckCXXCompilerFlag)
-CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
-CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+if(MSVC)
+    add_definitions(-D_HAS_STD_BYTE=0)
+endif()
 
 # Compilation options settings
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
@@ -49,16 +52,6 @@ elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
     add_compile_options(/bigobj)
     add_compile_options(/MP4)
     add_compile_options(/w)
-endif()
-
-if(COMPILER_SUPPORTS_CXX11)
-    set(CMAKE_CXX_STANDARD 11)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -pthread")
-elseif(COMPILER_SUPPORTS_CXX0X)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x -pthread")
-else()
-    message(STATUS "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
 endif()
 
 # Choose different compilation configurations according to VS compilation
@@ -99,13 +92,18 @@ message(STATUS "The program main directory is : ${ROOT}")
 
 # set lib name
 set(file_fold 
-    spdlog gexport gio gutils gcoders gmodels gall gdata gset pugixml gproc gprod gambfix newmat gins gmsf gfgo gfactor gfgognss gfgomsf ginitialize)
+    spdlog gexport gio gutils gcoders gmodels gall gdata gset pugixml gproc gprod gambfix newmat gins gmsf gfgo gfactor gfgognss gfgomsf gct ginitialize)
 message(${file_fold})
 set(PrintFile FALSE)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 # link third party
+set(ceres_ROOT "${ROOT}/Third-party/ceres2.0-zyx" CACHE PATH "Ceres package root")
+set(sophus_ROOT "${ROOT}/Third-party/Sophus" CACHE PATH "Sophus root containing the sophus headers")
+# Use the same Ceres package for LibGREAT and the application targets.
+set(Third_ceres_ROOT "${ceres_ROOT}" CACHE PATH "Ceres package root used by LibGREAT" FORCE)
+
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
     #For windows
     # ==============================================================================

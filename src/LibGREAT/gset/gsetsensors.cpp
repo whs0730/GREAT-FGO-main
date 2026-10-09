@@ -20,6 +20,8 @@ namespace gfgomsf
 			return MSF_TYPE::GINS_TC_MODE;
 		if (tmp == "GINS_LC")
 			return MSF_TYPE::GINS_LC_MODE;
+		if (tmp == "GINS_CT")
+			return MSF_TYPE::GINS_CT_MODE;
 		if (tmp == "GNSS")
 			return MSF_TYPE::GNSS_MODE;
 		return GINS_TC_MODE;

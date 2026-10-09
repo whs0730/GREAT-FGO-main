@@ -47,6 +47,7 @@ endif()
 include_directories(${Third_Eigen_ROOT})
 include_directories(${Third_GLFW_ROOT}/include)
 include_directories(${Third_ceres_ROOT}/include)  
+include_directories(${sophus_ROOT})
 include_directories(${LibGnutSrc})
 include_directories(${LibGREATSrc})
 
@@ -139,6 +140,16 @@ set(FGO_dllfile
 		${Third_ceres_ROOT}/bin/glog.dll
 		${Third_ceres_ROOT}/bin/lapack.dll
 		${Third_ceres_ROOT}/bin/openblas.dll)
+	# Ceres 2 may depend on additional SuiteSparse and Fortran runtime DLLs.
+	# Keep the Ceres 1 package usable when those DLLs are not present.
+	foreach(ceres_runtime_dll IN ITEMS
+		libcholmod.dll liblapack.dll libspqr.dll
+		libamd.dll libcamd.dll libccolamd.dll libcolamd.dll
+		libgcc_s_seh-1.dll libgfortran-5.dll libquadmath-0.dll libwinpthread-1.dll)
+		if(EXISTS "${Third_ceres_ROOT}/bin/${ceres_runtime_dll}")
+			list(APPEND FGO_dllfile "${Third_ceres_ROOT}/bin/${ceres_runtime_dll}")
+		endif()
+	endforeach()
 	file(COPY 	${FGO_dllfile}	DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Release			)
 	file(COPY 	${FGO_dllfile}	DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/MinSizeRel		)
 	file(COPY 	${FGO_dllfile}	DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/RelWithDebInfo	)
