@@ -32,13 +32,13 @@ struct SplineLocation {
 template <int Order>
 SplineLocation Locate(const SplineMeta<Order>& meta, double time_s) {
     if (meta.segments.empty() || !std::isfinite(time_s)) {
-        throw std::invalid_argument("CT IMU factor requires nonempty spline metadata and finite time");
+        throw std::invalid_argument("CT factor requires nonempty spline metadata and finite time");
     }
     for (const auto& segment : meta.segments) {
         if (!std::isfinite(segment.t0) || !std::isfinite(segment.dt)
             || segment.dt <= 0.0 || segment.n < static_cast<std::size_t>(Order)
             || !std::isfinite(segment.MaxTime())) {
-            throw std::invalid_argument("CT IMU factor received invalid spline metadata");
+            throw std::invalid_argument("CT factor received invalid spline metadata");
         }
     }
     std::size_t offset = 0;
@@ -53,7 +53,7 @@ SplineLocation Locate(const SplineMeta<Order>& meta, double time_s) {
         }
         offset += segment.NumParameters();
     }
-    throw std::out_of_range("CT IMU timestamp is outside the supplied spline metadata");
+    throw std::out_of_range("CT timestamp is outside the supplied spline metadata");
 }
 
 inline void ValidateMeasurement(const gct::CtImuSample& sample, double weight) {
