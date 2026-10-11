@@ -18,39 +18,38 @@
 
 namespace gfgomsf
 {
-    // Based on GnssPositionFactor: antenna prediction and covariance weighting
-    // are retained; the discrete pose parameter becomes SO3 and position knots.
-    // R maps body to ECEF. Position knots use ECEF axes and are relative to the
-    // fixed position_origin_ecef_m supplied when constructing the factor.
+    // GNSS position factor using SO3 and position spline control points.
+    // R maps body to ECEF; position knots are relative to a fixed ECEF origin.
     template <int Order>
     class CtGnssPositionFactor
     {
         static_assert(Order >= 2, "CT GNSS position factors require a spline");
 
-    public:
-        using SplineMetaType = SplineMeta<Order>;
-
     private:
+        /// GNSS antenna position relative to the fixed ECEF origin, in metres.
         Eigen::Vector3d _gnss_position;
+        /// Position square-root information matrix.
         Eigen::Matrix3d _sqrt_info;
+        /// IMU-to-GNSS lever arm in the body frame, in metres.
         Eigen::Vector3d _lever_arm;
-        ct_imu_detail::SplineLocation _so3_location{}, _position_location{};
-        std::size_t _position_offset = 0;
+        ct_imu_detail::SplineLocation _so3_location;
+        ct_imu_detail::SplineLocation _position_location;
+        std::size_t _position_offset;
 
     public:
-        CtGnssPositionFactor(const SplineMetaType& so3_meta,
-                             const SplineMetaType& position_meta,
+        CtGnssPositionFactor(const SplineMeta<Order>& so3_meta,
+                             const SplineMeta<Order>& position_meta,
                              const gct::CtGnssPosition& observation,
                              const Eigen::Vector3d& lever_arm_body_m,
-                             const Eigen::Vector3d& position_origin_ecef_m = Eigen::Vector3d::Zero()): _lever_arm(lever_arm_body_m)
+                             const Eigen::Vector3d& position_origin_ecef_m = Eigen::Vector3d::Zero())
+            : _lever_arm(lever_arm_body_m), _position_offset(0)
         {
             if (!observation.IsValid() || !_lever_arm.allFinite()
                 || !position_origin_ecef_m.allFinite()) 
             {
                 throw std::invalid_argument("CT GNSS factor requires a valid observation, finite lever arm and origin");
             }
-            // Subtract absolute ECEF coordinates once, in double precision,
-            // before evaluating relative knots and automatic-differentiation Jets.
+            // Use the same fixed ECEF origin as the position control points.
             _gnss_position = observation.position_ecef_m - position_origin_ecef_m;
             if (!_gnss_position.allFinite()) 
             {
@@ -60,11 +59,10 @@ namespace gfgomsf
             _position_location = ct_imu_detail::Locate(position_meta, observation.time_s);
             _position_offset = so3_meta.NumParameters() + _position_location.offset;
 
-            // Diagonal covariance gives diag(1 / sqrt(Rpos)), as in the original
-            // factor. Full covariance retains correlations: Sigma = L L^T,
-            // and sqrt_info = L^-1. Invalid covariance is rejected by the CT type.
+            // Sigma = L * L^T; sqrt_info = L^-1.
             const Eigen::LLT<Eigen::Matrix3d> decomposition(observation.position_covariance_ecef_m2);
-            _sqrt_info = decomposition.matrixL().solve(Eigen::Matrix3d::Identity());
+            Eigen::Matrix3d identity = Eigen::Matrix3d::Identity();
+            _sqrt_info = decomposition.matrixL().solve(identity);
             if (!_sqrt_info.allFinite()) 
             {
                 throw std::invalid_argument("CT GNSS covariance produces nonfinite square-root information");
@@ -73,19 +71,33 @@ namespace gfgomsf
 
         // Fully configured cost: SO3 blocks [qx,qy,qz,qw] first, followed by
         // 3-vector relative-position blocks. Do not add blocks to the cost again.
-        static auto Create(const SplineMetaType& so3_meta,
-                           const SplineMetaType& position_meta,
+        static ceres::DynamicAutoDiffCostFunction<CtGnssPositionFactor<Order>>* Create(
+                           const SplineMeta<Order>& so3_meta,
+                           const SplineMeta<Order>& position_meta,
                            const gct::CtGnssPosition& observation,
                            const Eigen::Vector3d& lever_arm_body_m,
                            const Eigen::Vector3d& position_origin_ecef_m = Eigen::Vector3d::Zero())
         {
-            std::vector<int> sizes(so3_meta.NumParameters(), 4);
-            sizes.insert(sizes.end(), position_meta.NumParameters(), 3);
-            return ct_imu_detail::MakeCost(new CtGnssPositionFactor(
-                so3_meta, position_meta, observation, lever_arm_body_m, position_origin_ecef_m), sizes);
+            std::vector<int> sizes;
+            std::size_t so3_count = so3_meta.NumParameters();
+            std::size_t position_count = position_meta.NumParameters();
+            for (std::size_t i = 0; i < so3_count; i++)
+            {
+                sizes.push_back(4);
+            }
+            for (std::size_t i = 0; i < position_count; i++)
+            {
+                sizes.push_back(3);
+            }
+
+            CtGnssPositionFactor<Order>* factor = new CtGnssPositionFactor<Order>(so3_meta, position_meta, observation, lever_arm_body_m, position_origin_ecef_m);
+            return ct_imu_detail::MakeCost(factor, sizes);
         }
 
-        static std::size_t TypeHashCode() { return typeid(CtGnssPositionFactor).hash_code(); }
+        static std::size_t TypeHashCode()
+        {
+            return typeid(CtGnssPositionFactor<Order>).hash_code();
+        }
 
         // r = sqrt_info * [p_origin + p(t) + R(t) * lever - z_GNSS].
         // p_origin has already been subtracted from _gnss_position above.
@@ -101,11 +113,14 @@ namespace gfgomsf
                 parameters + _position_offset, _position_location.u,
                 _position_location.inverse_dt, &Pi);
 
-            const Eigen::Matrix<T, 3, 1> prediction_position =
-                Pi + Ri * _lever_arm.template cast<T>();
+            Eigen::Matrix<T, 3, 1> lever_arm = _lever_arm.template cast<T>();
+            Eigen::Matrix<T, 3, 1> gnss_position = _gnss_position.template cast<T>();
+            Eigen::Matrix<T, 3, 3> sqrt_info = _sqrt_info.template cast<T>();
+
+            Eigen::Matrix<T, 3, 1> prediction_position = Pi + Ri * lever_arm;
+            Eigen::Matrix<T, 3, 1> position_error = prediction_position - gnss_position;
             Eigen::Map<Eigen::Matrix<T, 3, 1>> residual(residuals);
-            residual = _sqrt_info.template cast<T>()
-                * (prediction_position - _gnss_position.template cast<T>());
+            residual = sqrt_info * position_error;
             return true;
         }
 
@@ -113,4 +128,4 @@ namespace gfgomsf
     };
 }  // namespace gfgomsf
 
-#endif  // CT_GNSS_POSITION_FACTOR_HPP
+#endif 
