@@ -4,7 +4,7 @@
 # CMake / build output
 build/
 build_Windows/
-
+/HANDOFF.md
 # Generated binaries and debug files
 *.log
 *.pdb
