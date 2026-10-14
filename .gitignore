@@ -5,6 +5,7 @@
 build/
 build_Windows/
 /HANDOFF.md
+/AGENTS.md
 # Generated binaries and debug files
 *.log
 *.pdb
