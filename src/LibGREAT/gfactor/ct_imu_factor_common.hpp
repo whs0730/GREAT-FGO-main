@@ -30,8 +30,8 @@ struct SplineLocation
     double inverse_dt;
 };
 
-// Check metadata before calling the teacher's assert-based lookup. Each sample
-// uses exactly Order adjacent knots; the offsets include preceding segments.
+// Metadata must cover Order adjacent knots at the observation time.
+// Offsets count parameter blocks in preceding metadata segments.
 template <int Order>
 SplineLocation Locate(const SplineMeta<Order>& meta, double time_s)
 {
@@ -84,13 +84,13 @@ inline void ValidateMeasurement(const gct::CtImuSample& sample, double weight)
     }
 }
 
-// Factories return fully configured three-residual cost functions. Ceres owns
-// the returned pointer after AddResidualBlock; do not add parameter blocks again.
+// Returned costs already define their parameter blocks and three residuals.
+// Default Ceres Problem options take ownership after AddResidualBlock.
 template <class Functor>
 ceres::DynamicAutoDiffCostFunction<Functor>* MakeCost(
     Functor* functor, const std::vector<int>& block_sizes)
 {
-    // Keep temporary ownership so an exception cannot leak the cost function.
+    // Retain ownership until parameter block setup succeeds.
     std::unique_ptr<ceres::DynamicAutoDiffCostFunction<Functor>> cost(
         new ceres::DynamicAutoDiffCostFunction<Functor>(functor));
 

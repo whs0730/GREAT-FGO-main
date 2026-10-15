@@ -9,9 +9,9 @@
 namespace gfgomsf {
 namespace gct {
 
-// A calibrated IMU sample in the body frame. Its timestamp must use the same
-// continuous seconds-based time axis as the spline knots (no GPS-week wrap).
-// Accelerometers measure specific force, not reference-frame acceleration.
+// Body-frame angular rate (rad/s) and specific force (m/s^2).
+// Timestamps share a continuous seconds axis with GNSS and splines, without
+// GPS-week wrap. Calibration and axis conversion belong to the caller.
 struct CtImuSample {
     double time_s = std::numeric_limits<double>::quiet_NaN();
     Eigen::Vector3d angular_rate_rad_s = Eigen::Vector3d::Zero();
@@ -37,8 +37,7 @@ struct CtImuSample {
         return sample;
     }
 
-    // delta_angle_rad and delta_velocity_m_s must already be calibrated and
-    // expressed in the body frame. This conversion does not change axes or time.
+    // interval_s must span these increments; axes and timestamps are not converted.
     static CtImuSample FromIncrements(double timestamp_s, double interval_s,
                                      const Eigen::Vector3d& delta_angle_rad,
                                      const Eigen::Vector3d& delta_velocity_m_s) 
@@ -54,10 +53,8 @@ struct CtImuSample {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
-// GNSS antenna position and its covariance, both expressed in ECEF.
-// time_s uses the same continuous seconds-based time axis as CtImuSample and
-// the spline knots. The backend applies the antenna lever arm and position
-// origin; this observation keeps the absolute ECEF position in metres.
+// Absolute GNSS antenna position (m) and covariance (m^2), both in ECEF.
+// Timestamps use the same continuous seconds as IMU samples and spline knots.
 struct CtGnssPosition {
     double time_s = std::numeric_limits<double>::quiet_NaN();
     Eigen::Vector3d position_ecef_m = Eigen::Vector3d::Zero();
@@ -93,8 +90,7 @@ struct CtGnssPosition {
         return observation;
     }
 
-    // Existing t_gposdata::data_pos::Rpos supplies X/Y/Z position variances
-    // in m^2, not standard deviations. No additional squaring is performed.
+    // t_gposdata::data_pos::Rpos contains ECEF variances (m^2), not standard deviations.
     static CtGnssPosition FromVariances(double timestamp_s,
                                         const Eigen::Vector3d& position_ecef,
                                         const Eigen::Vector3d& position_variances_ecef_m2) 

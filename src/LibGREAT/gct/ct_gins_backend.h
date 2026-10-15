@@ -5,6 +5,7 @@
 #include "gct/gspline/rd_spline.h"
 #include "gct/gspline/so3_spline.h"
 #include <Eigen/Geometry>
+#include <string>
 #include <vector>
 
 namespace gfgomsf
@@ -23,7 +24,35 @@ struct CtGinsState
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
-// Observation storage and initial trajectory. Factor assembly/solving follows later.
+struct CtGinsSolveOptions
+{
+    // Standard deviations, not variances. IMU weights are 1/sigma per sample.
+    double gyro_std_rad_s = 0.01;
+    double accel_std_m_s2 = 0.1;
+    double gyro_bias_prior_std_rad_s = 0.01;
+    double accel_bias_prior_std_m_s2 = 0.1;
+    double initial_attitude_std_rad = 0.05;
+    int max_iterations = 100;
+    int num_threads = 1;
+};
+
+struct CtGinsSolveResult
+{
+    // A usable result may reach the iteration limit without convergence.
+    bool usable = false;
+    bool converged = false;
+    std::size_t imu_samples_used = 0;
+    std::size_t gnss_positions_used = 0;
+    std::size_t imu_samples_skipped = 0;
+    std::size_t gnss_positions_skipped = 0;
+    int iterations = 0;
+    // Ceres cost is half the sum of squared weighted residuals.
+    double initial_cost = 0.0;
+    double final_cost = 0.0;
+    std::string message;
+};
+
+// Batch continuous-time optimization with constant body-frame IMU biases.
 class CtGinsBackend
 {
 public:
@@ -34,17 +63,24 @@ public:
 
     // Lever arm: IMU -> antenna in body metres. Gravity is a fixed ECEF vector.
     void SetParameters(double knot_interval_s, const Eigen::Vector3d& lever_arm_body_m,const Eigen::Vector3d& gravity_ecef_m_s2);
-    // Times must share one seconds-based axis and increase within each sensor stream.
-    // Adding observations or changing parameters requires reinitializing the trajectory.
+    // Each sensor stream requires increasing timestamps on the shared seconds axis.
+    // New observations or SetParameters() invalidate the initialized trajectory.
     void AddImuSample(const CtImuSample& sample);
     void AddGnssPosition(const CtGnssPosition& observation);
     void ClearData();
 
-    // First GNSS position is the fixed ECEF origin. Positions are interpolated
-    // for an initial guess; all attitude knots start at the supplied rotation.
+    // Uses the first GNSS antenna position as the ECEF origin. Position knots get
+    // GNSS-based guesses; all attitude knots start at the supplied rotation.
     void Initialize(const Eigen::Quaterniond& rotation_body_to_ecef);
     bool IsInitialized() const;
-    // Spline query interval is [MinTime(), MaxTime()); includes the last observation.
+    // Sets starting biases and prior centres in body-frame rad/s and m/s^2.
+    void SetInitialBiases(const Eigen::Vector3d& gyro_bias_rad_s,const Eigen::Vector3d& accel_bias_m_s2);
+    // Requires SetParameters() and Initialize(); gravity and lever arm stay fixed.
+    // Only a usable result replaces the stored trajectory and biases.
+    CtGinsSolveResult Solve(const CtGinsSolveOptions& options = CtGinsSolveOptions());
+    // Tracks an accepted solution, not the success of the latest Solve() call.
+    bool IsSolved() const;
+    // Query interval is [MinTime(), MaxTime()); covers the observation overlap end.
     double MinTime() const;
     double MaxTime() const;
     CtGinsState GetState(double time_s) const;
@@ -54,6 +90,8 @@ public:
     const Eigen::Vector3d& GetPositionOrigin() const;
     const Eigen::Vector3d& GetLeverArm() const;
     const Eigen::Vector3d& GetGravity() const;
+    const Eigen::Vector3d& GetGyroBias() const;
+    const Eigen::Vector3d& GetAccelBias() const;
     const RdSpline<3, SplineOrder>& GetPositionSpline() const;
     const So3Spline<SplineOrder>& GetAttitudeSpline() const;
 
@@ -62,9 +100,16 @@ public:
 private:
     double _knot_interval;
     bool _initialized;
+    bool _parameters_set;
+    bool _solved;
     Eigen::Vector3d _position_origin;
     Eigen::Vector3d _lever_arm;
     Eigen::Vector3d _gravity;
+    Eigen::Vector3d _gyro_bias;
+    Eigen::Vector3d _accel_bias;
+    Eigen::Vector3d _initial_gyro_bias;
+    Eigen::Vector3d _initial_accel_bias;
+    Eigen::Quaterniond _initial_rotation;
     std::vector<CtImuSample> _imu_data;
     std::vector<CtGnssPosition> _gnss_data;
     RdSpline<3, SplineOrder> _position_spline;

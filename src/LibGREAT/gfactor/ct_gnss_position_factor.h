@@ -18,8 +18,7 @@
 
 namespace gfgomsf
 {
-    // GNSS position factor using SO3 and position spline control points.
-    // R maps body to ECEF; position knots are relative to a fixed ECEF origin.
+    // R maps body to ECEF; position knots are IMU positions relative to a fixed origin.
     template <int Order>
     class CtGnssPositionFactor
     {
@@ -28,7 +27,7 @@ namespace gfgomsf
     private:
         /// GNSS antenna position relative to the fixed ECEF origin, in metres.
         Eigen::Vector3d _gnss_position;
-        /// Position square-root information matrix.
+        /// L^-1 for the ECEF covariance Sigma = L * L^T.
         Eigen::Matrix3d _sqrt_info;
         /// IMU-to-GNSS lever arm in the body frame, in metres.
         Eigen::Vector3d _lever_arm;
@@ -49,7 +48,6 @@ namespace gfgomsf
             {
                 throw std::invalid_argument("CT GNSS factor requires a valid observation, finite lever arm and origin");
             }
-            // Use the same fixed ECEF origin as the position control points.
             _gnss_position = observation.position_ecef_m - position_origin_ecef_m;
             if (!_gnss_position.allFinite()) 
             {
@@ -69,8 +67,8 @@ namespace gfgomsf
             }
         }
 
-        // Fully configured cost: SO3 blocks [qx,qy,qz,qw] first, followed by
-        // 3-vector relative-position blocks. Do not add blocks to the cost again.
+        // SO3 blocks [qx,qy,qz,qw] precede 3-vector relative-position blocks.
+        // The returned cost already has its block sizes and residual count set.
         static ceres::DynamicAutoDiffCostFunction<CtGnssPositionFactor<Order>>* Create(
                            const SplineMeta<Order>& so3_meta,
                            const SplineMeta<Order>& position_meta,
@@ -99,8 +97,8 @@ namespace gfgomsf
             return typeid(CtGnssPositionFactor<Order>).hash_code();
         }
 
-        // r = sqrt_info * [p_origin + p(t) + R(t) * lever - z_GNSS].
-        // p_origin has already been subtracted from _gnss_position above.
+        // _gnss_position is z_GNSS-origin; position knots use the same origin.
+        // r = L^-1 * (p(t) + R(t)*lever - _gnss_position).
         template <class T>
         bool operator()(T const* const* parameters, T* residuals) const
         {

@@ -1,6 +1,6 @@
 # Visual Studio
 .vs/
-
+tests/
 # CMake / build output
 build/
 build_Windows/
