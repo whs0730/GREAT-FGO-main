@@ -17,6 +17,9 @@
 #include "gfactor/ginitial_pose_factor.h"
 #include "gfactor/ginitial_bias_factor.h"
 #include "gfactor/gnss_position_factor.h"
+#include "gct/ct_gins_backend.h"
+#include <cmath>
+#include <stdexcept>
 using namespace gfgomsf;
 
 gfgomsf::t_gfgo_gins::t_gfgo_gins(string site, string site_base, t_gsetbase* gset, std::shared_ptr<spdlog::logger> spdlog, t_gallproc* allproc) :
@@ -52,6 +55,11 @@ int gfgomsf::t_gfgo_gins::ProcessBatch(const t_gtime& beg, const t_gtime& end, b
 		if (_spdlog) SPDLOG_LOGGER_ERROR(_spdlog, string("gintegration:  ") + os.str());
 		_gmutex.unlock();
 		return -1;
+	}
+	else if (_msf_type == MSF_TYPE::GINS_CT_MODE)
+	{
+		_gmutex.unlock();
+		return _process_ct_batch(beg, end, beg_end);
 	}
 	int sign = 1;
 	double subint = 0.1;
@@ -181,6 +189,252 @@ int gfgomsf::t_gfgo_gins::ProcessBatch(const t_gtime& beg, const t_gtime& end, b
 	_gmutex.unlock();
 	return 0;
 }
+int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& end, bool beg_end)
+{
+	try
+	{
+		// IMU timestamps contain seconds of week; week rollover is not reconstructed.
+		if (!beg_end || beg >= end || beg.gwk() != end.gwk())
+		{
+			throw std::invalid_argument("CT processing requires a forward interval within one GPS week");
+		}
+		if (_imudata == nullptr || _imudata->size(true) < 2 || _fins == nullptr)
+		{
+			throw std::invalid_argument("CT processing requires IMU data and an INS output stream");
+		}
+		t_gsetign* integration_settings = dynamic_cast<t_gsetign*>(_setkf);
+		t_gsetins* ins_settings = dynamic_cast<t_gsetins*>(_setkf);
+		if (integration_settings->ign_type() != IGN_TYPE::LCI || _shm.freq <= 0
+			|| !std::isfinite(_sampling) || _sampling <= 0.0)
+		{
+			throw std::invalid_argument("CT position fusion requires GNSS Type=LCI and positive input frequencies");
+		}
+		gct::CtGinsSolveOptions options;
+		options.gyro_std_rad_s = _gyr_n;
+		options.accel_std_m_s2 = _acc_n;
+		options.max_iterations = _max_num_iterations;
+		Eigen::Vector3d attitude_std = integration_settings->initial_misalignment_std();
+		Eigen::Vector3d gyro_std = integration_settings->initial_gyro_std();
+		Eigen::Vector3d accel_std = integration_settings->initial_acce_std();
+		if (!attitude_std.allFinite() || attitude_std.minCoeff() <= 0.0
+			|| !gyro_std.allFinite() || gyro_std.minCoeff() <= 0.0
+			|| !accel_std.allFinite() || accel_std.minCoeff() <= 0.0)
+		{
+			throw std::invalid_argument("CT initial attitude and bias standard deviations must be positive");
+		}
+		// Scalar priors use the largest configured axis standard deviation.
+		// Convert configuration units (deg, deg/h, mg) to SI for the CT factors.
+		options.initial_attitude_std_rad = attitude_std.maxCoeff() * t_gglv::deg;
+		options.gyro_bias_prior_std_rad_s = gyro_std.maxCoeff() * t_gglv::dph;
+		options.accel_bias_prior_std_m_s2 = accel_std.maxCoeff() * t_gglv::mg;
+		int output_frequency = ins_settings->out_intsec() ? 1 : ins_settings->out_freq();
+		if (output_frequency <= 0)
+		{
+			throw std::invalid_argument("CT output frequency must be positive");
+		}
+		_beg_end = true;
+		if (!t_gpvtflt::InitProc(beg, end))
+		{
+			throw std::runtime_error("CT GNSS filter initialization failed");
+		}
+		_gobs->setepoches(_site);
+		_gnss_beg = beg;
+		_gnss_end = end;
+		_gnss_crt = _gobs->beg_obs(_site);
+		lever = integration_settings->lever();
+		// CT factors consume individual decoded increments, without resampling.
+		_shm.nSamples = 1;
+		double sample_interval = 1.0 / static_cast<double>(_shm.freq);
+		gct::CtGinsBackend backend;
+		std::vector<t_gposdata::data_pos> gnss_results;
+		std::vector<double> gnss_ratios;
+		t_gposdata::data_pos latest_position = {};
+		double latest_ratio = 0.0;
+		t_gtime last_processed(t_gtime::GPS);
+		bool have_processed_epoch = false;
+		bool have_position = false;
+		bool trajectory_started = false;
+		Eigen::Quaterniond initial_rotation = Eigen::Quaterniond::Identity();
+		while (_imudata->load(_wm, _vm, _shm.t, _shm.ts, 1, true))
+		{
+			_imu_crt = t_gtime(beg.gwk(), _shm.t);
+			_ins_crt = _imu_crt;
+			if (_imu_crt < beg || _shm.t < ins_settings->start())
+			{
+				continue;
+			}
+			if (_imu_crt > end || _shm.t > ins_settings->end())
+			{
+				break;
+			}
+			if (_aligned && !trajectory_started)
+			{
+				// Propagate the initial INS attitude until CT observation collection starts.
+				sins.Update(_wm, _vm, _shm);
+			}
+			// _time_valid sets the actual GNSS epoch; process it once as IMU time advances.
+			t_gtime candidate = _gobs->load(_site, _shm.t);
+			bool new_position = false;
+			if (candidate >= beg && candidate <= end
+				&& (!have_processed_epoch || candidate > last_processed)
+				&& _time_valid(_gnss_crt, _imu_crt))
+			{
+				last_processed = _gnss_crt;
+				have_processed_epoch = true;
+				t_gposdata::data_pos position = {};
+				MEAS_TYPE measurement = _getPOS(position);
+				if (measurement != NO_MEAS)
+				{
+					gct::CtGnssPosition observation;
+					// Both sensors use seconds relative to beg, retaining their own observation times.
+					observation.time_s = _gnss_crt.diff(beg);
+					observation.position_ecef_m = position.pos;
+					observation.position_covariance_ecef_m2 = position.Rpos.asDiagonal();
+					if (observation.IsValid() && position.vn.allFinite())
+					{
+						latest_position = position;
+						latest_position.t = observation.time_s;
+						latest_ratio = _ambfix != nullptr ? _ambfix->get_ratio() : 0.0;
+						have_position = true;
+						new_position = true;
+					}
+				}
+			}
+			if (!_aligned && have_position)
+			{
+				_aligned = cascaded_align(latest_position.pos, latest_position.vn);
+			}
+			if (!_aligned || !have_position)
+			{
+				continue;
+			}
+			if (!trajectory_started)
+			{
+				Eigen::Vector3d blh = Cart2Geod(latest_position.pos, false);
+				// qnb maps body to local ENU; the attitude spline maps body to ECEF.
+				Eigen::Matrix3d body_to_ecef = t_gbase::Cen(blh) * t_gbase::q2mat(sins.qnb);
+				initial_rotation = Eigen::Quaterniond(body_to_ecef);
+				t_gearth earth;
+				earth.Update(blh, Eigen::Vector3d::Zero());
+				// Hold gravity at the initial location for the entire CT batch.
+				Eigen::Vector3d gravity_ecef = earth.Cen * earth.gn;
+				// Knot spacing follows GNSS sampling; lever is body-frame IMU-to-antenna (m).
+				backend.SetParameters(_sampling, lever, gravity_ecef);
+				backend.SetInitialBiases(sins.eb, sins.db);
+				backend.AddGnssPosition(gct::CtGnssPosition::FromVariances(
+					latest_position.t, latest_position.pos, latest_position.Rpos));
+				gnss_results.push_back(latest_position);
+				gnss_ratios.push_back(latest_ratio);
+				trajectory_started = true;
+			}
+			// Apply scale calibration; FromIncrements converts rad and m/s to rad/s and m/s^2.
+			// Biases remain in the measurements and are estimated by the backend.
+			Eigen::Vector3d delta_angle = sins.Kg.asDiagonal() * _wm.front();
+			Eigen::Vector3d delta_velocity = sins.Ka.asDiagonal() * _vm.front();
+			backend.AddImuSample(gct::CtImuSample::FromIncrements(
+				_imu_crt.diff(beg), sample_interval, delta_angle, delta_velocity));
+			if (new_position && latest_position.t > gnss_results.back().t)
+			{
+				backend.AddGnssPosition(gct::CtGnssPosition::FromVariances(
+					latest_position.t, latest_position.pos, latest_position.Rpos));
+				gnss_results.push_back(latest_position);
+				gnss_ratios.push_back(latest_ratio);
+			}
+		}
+		if (!trajectory_started)
+		{
+			throw std::runtime_error("CT processing has no aligned IMU/GNSS overlap");
+		}
+		// Initialize and optimize one trajectory after collecting the full batch.
+		backend.Initialize(initial_rotation);
+		std::cout << "[CT] assembled imu=" << backend.GetImuSamples().size()
+			<< " gnss=" << backend.GetGnssPositions().size()
+			<< " knot_interval=" << _sampling << " output_hz=" << output_frequency << std::endl;
+		gct::CtGinsSolveResult result = backend.Solve(options);
+		std::cout << "[CT] " << result.message
+			<< " imu_used=" << result.imu_samples_used
+			<< " gnss_used=" << result.gnss_positions_used << std::endl;
+		if (!result.usable)
+		{
+			throw std::runtime_error("CT solver did not produce a usable trajectory");
+		}
+		// Stop output at the earlier sensor endpoint, within the spline's [MinTime, MaxTime) domain.
+		double last_time = std::min(backend.GetImuSamples().back().time_s,
+			backend.GetGnssPositions().back().time_s);
+		double origin_sow = beg.sow() + beg.dsec();
+		// Align the output grid to GPS seconds of week, even when beg is fractional.
+		double first_time = std::ceil((origin_sow + backend.MinTime()) * output_frequency)
+			/ output_frequency - origin_sow;
+		std::size_t quality_index = 0;
+		std::size_t output_count = 0;
+		for (std::size_t i = 0; ; i++)
+		{
+			double time = first_time + static_cast<double>(i) / output_frequency;
+			if (time > last_time || time >= backend.MaxTime())
+			{
+				break;
+			}
+			gct::CtGinsState state = backend.GetState(time);
+			t_gtime epoch = beg + time;
+			sins.t = epoch.sow() + epoch.dsec();
+			// Populate ECEF and local ENU fields expected by the existing INS formatter.
+			sins.pos_ecef = state.position_ecef_m;
+			sins.xyz_out = state.position_ecef_m;
+			sins.pos = Cart2Geod(sins.pos_ecef, false);
+			sins.eth.Update(sins.pos, Eigen::Vector3d::Zero());
+			sins.ve = state.velocity_ecef_m_s;
+			sins.vn = sins.eth.Cne * sins.ve;
+			sins.Ceb = state.rotation_body_to_ecef.toRotationMatrix();
+			sins.Cbe = sins.Ceb.transpose();
+			sins.qeb = t_gbase::m2qua(sins.Ceb);
+			sins.Cnb = sins.eth.Cne * sins.Ceb;
+			sins.Cbn = sins.Cnb.transpose();
+			sins.qnb = t_gbase::m2qua(sins.Cnb);
+			sins.att = t_gbase::m2att(sins.Cnb);
+			sins.vb = sins.Cbn * sins.vn;
+			sins.eb = backend.GetGyroBias();
+			sins.db = backend.GetAccelBias();
+			_ins_crt = epoch;
+			while (quality_index + 1 < gnss_results.size()
+				&& gnss_results[quality_index + 1].t <= time)
+			{
+				quality_index++;
+			}
+			const t_gposdata::data_pos& quality = gnss_results[quality_index];
+			// Frontend GNSS quality applies only at its observation epoch, not between observations.
+			bool gnss_epoch = std::abs(time - quality.t) < 1e-6;
+			// Reuse the INS formatter without the discrete solver's KML/covariance path.
+			std::ostringstream output;
+			output << '1';
+			sins.prt_sins(output);
+			output << " " << std::setw(10) << (gnss_epoch ? "CT_GNSS" : "CT_INS")
+				<< " " << std::setw(5) << (gnss_epoch ? quality.nSat : 0)
+				<< std::fixed << std::setprecision(2)
+				<< " " << std::setw(7) << (gnss_epoch ? quality.PDOP : 0.0)
+				<< " " << std::setw(8) << (gnss_epoch ? (quality.amb_state ? "Fixed" : "Float") : "NA")
+				<< " " << std::setw(8) << (gnss_epoch ? gnss_ratios[quality_index] : 0.0) << std::endl;
+			std::string line = output.str();
+			_fins->write(line.c_str(), line.size());
+			output_count++;
+		}
+		std::cout << "[CT] output_rows=" << output_count << std::endl;
+		if (output_count == 0)
+		{
+			throw std::runtime_error("CT trajectory contains no requested output epoch");
+		}
+		return 0;
+	}
+	catch (const std::exception& error)
+	{
+		std::cerr << "[CT ERROR] " << error.what() << std::endl;
+		if (_spdlog)
+		{
+			SPDLOG_LOGGER_ERROR(_spdlog, "CT processing failed: {}", error.what());
+		}
+		return -1;
+	}
+}
+
 void gfgomsf::t_gfgo_gins::_input_imu_data(const double& t, const vector<Eigen::Vector3d>& wm, const vector<Eigen::Vector3d>& vm)
 {
 	assert(wm.size() == vm.size());

@@ -92,6 +92,8 @@ namespace gfgomsf
 
 	protected:
 
+		int _process_ct_batch(const t_gtime& beg, const t_gtime& end, bool beg_end);
+
 		/**
 		 * @brief Initialize GNSS/INS integration processing
 		 * Sets up time ranges, validates IMU data availability, and initializes INS filter
