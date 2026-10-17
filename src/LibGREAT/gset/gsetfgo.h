@@ -150,6 +150,12 @@ namespace  gfgo
 		*/
 		int gins_window_size();
 
+		// CT durations are seconds. A zero window keeps the batch path;
+		// a zero knot interval uses the configured GNSS sampling interval.
+		double ct_window_sec();
+		double ct_update_sec();
+		double ct_knot_sec();
+
 		/**
 		* @brief  check whether estimate cam->IMU extrinsic parameters.
 		* @return

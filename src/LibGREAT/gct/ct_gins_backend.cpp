@@ -2,6 +2,7 @@
 #include "gfactor/imu_gyro_factor.hpp"
 #include "gfactor/imu_acce_factor.hpp"
 #include "gfactor/ct_gnss_position_factor.h"
+#include "gfactor/ct_marginalization_factor.h"
 #include <ceres/ceres.h>
 #include <algorithm>
 #include <cmath>
@@ -101,10 +102,40 @@ double GetLocalBlocks(RdSpline<3, CtGinsBackend::SplineOrder>& position_spline,
     return segment_time;
 }
 
+void AddMarginalizationPrior(ceres::Problem& problem, const CtMarginalizationPrior& prior,
+    RdSpline<3, CtGinsBackend::SplineOrder>& position_spline,
+    So3Spline<CtGinsBackend::SplineOrder>& attitude_spline,
+    Eigen::Vector3d& gyro_bias, Eigen::Vector3d& accel_bias)
+{
+    std::vector<double*> blocks;
+    for (std::size_t i = 0; i < prior.blocks.size(); i++)
+    {
+        const CtMarginalizationBlock& block = prior.blocks[i];
+        if (block.type == CtMarginalizationBlock::ROTATION)
+        {
+            blocks.push_back(attitude_spline.GetKnot(block.knot).data());
+        }
+        else if (block.type == CtMarginalizationBlock::POSITION)
+        {
+            blocks.push_back(position_spline.GetKnot(block.knot).data());
+        }
+        else if (block.type == CtMarginalizationBlock::GYRO_BIAS)
+        {
+            blocks.push_back(gyro_bias.data());
+        }
+        else
+        {
+            blocks.push_back(accel_bias.data());
+        }
+    }
+    problem.AddResidualBlock(CtMarginalizationFactor::Create(prior), nullptr, blocks);
+}
+
 }  // namespace
 
 CtGinsBackend::CtGinsBackend()
     : _knot_interval(0.1), _initialized(false), _parameters_set(false), _solved(false),
+      _window_started(false), _fixed_prefix_knots(0), _marginalization_enabled(false), _window_end_time(0.0),
       _position_origin(Eigen::Vector3d::Zero()), _lever_arm(Eigen::Vector3d::Zero()),
       _gravity(Eigen::Vector3d::Zero()),
       _gyro_bias(Eigen::Vector3d::Zero()), _accel_bias(Eigen::Vector3d::Zero()),
@@ -130,6 +161,11 @@ void CtGinsBackend::SetParameters(double knot_interval_s,
     _parameters_set = true;
     _initialized = false;
     _solved = false;
+    _window_started = false;
+    _fixed_prefix_knots = 0;
+    _window_end_time = 0.0;
+    _marginalization_prior = CtMarginalizationPrior();
+    _pending_prior = CtMarginalizationPrior();
 }
 
 void CtGinsBackend::AddImuSample(const CtImuSample& sample)
@@ -143,7 +179,10 @@ void CtGinsBackend::AddImuSample(const CtImuSample& sample)
         throw std::invalid_argument("CT IMU timestamps must strictly increase");
     }
     _imu_data.push_back(sample);
-    _initialized = false;
+    if (!_window_started)
+    {
+        _initialized = false;
+    }
     _solved = false;
 }
 
@@ -158,7 +197,10 @@ void CtGinsBackend::AddGnssPosition(const CtGnssPosition& observation)
         throw std::invalid_argument("CT GNSS timestamps must strictly increase");
     }
     _gnss_data.push_back(observation);
-    _initialized = false;
+    if (!_window_started)
+    {
+        _initialized = false;
+    }
     _solved = false;
 }
 
@@ -174,6 +216,11 @@ void CtGinsBackend::ClearData()
     _initial_rotation = Eigen::Quaterniond::Identity();
     _initialized = false;
     _solved = false;
+    _window_started = false;
+    _fixed_prefix_knots = 0;
+    _window_end_time = 0.0;
+    _marginalization_prior = CtMarginalizationPrior();
+    _pending_prior = CtMarginalizationPrior();
 }
 
 void CtGinsBackend::Initialize(const Eigen::Quaterniond& rotation_body_to_ecef)
@@ -254,6 +301,11 @@ void CtGinsBackend::Initialize(const Eigen::Quaterniond& rotation_body_to_ecef)
     _position_spline = std::move(position_spline);
     _attitude_spline = std::move(attitude_spline);
     _position_origin = origin;
+    _window_started = false;
+    _fixed_prefix_knots = 0;
+    _window_end_time = 0.0;
+    _marginalization_prior = CtMarginalizationPrior();
+    _pending_prior = CtMarginalizationPrior();
     _initial_rotation = rotation;
     _gyro_bias = _initial_gyro_bias;
     _accel_bias = _initial_accel_bias;
@@ -278,6 +330,343 @@ void CtGinsBackend::SetInitialBiases(const Eigen::Vector3d& gyro_bias_rad_s,
     _gyro_bias = gyro_bias_rad_s;
     _accel_bias = accel_bias_m_s2;
     _solved = false;
+}
+
+CtGinsSolveResult CtGinsBackend::SolveWindow(double duration_s,const Eigen::Quaterniond& initial_rotation, const CtGinsSolveOptions& options)
+{
+    if (!_parameters_set || !std::isfinite(duration_s) || duration_s < 2.0 * _knot_interval)
+    {
+        throw std::invalid_argument("CT window requires parameters and a duration of at least two knot intervals");
+    }
+    if (_imu_data.size() < 2 || _gnss_data.empty())
+    {
+        throw std::invalid_argument("CT window requires IMU data and an initial GNSS reference");
+    }
+    double end_time = _imu_data.back().time_s;
+    // Prepare and solve a copy so a failed update cannot discard the last valid window.
+    CtGinsBackend candidate = *this;
+    if (!_window_started)
+    {
+        double first_time = std::max(_imu_data.front().time_s, _gnss_data.front().time_s);
+        if (end_time - first_time > duration_s + _knot_interval)
+        {
+            throw std::invalid_argument("CT first window is too long; solve before collecting the next window");
+        }
+        candidate.Initialize(initial_rotation);
+    }
+    double start_time = candidate._position_spline.MinTime();
+    Eigen::Vector3d tail_position = Eigen::Vector3d::Zero();
+    Eigen::Vector3d tail_velocity = Eigen::Vector3d::Zero();
+    Eigen::Vector3d tail_acceleration = Eigen::Vector3d::Zero();
+    Eigen::Vector3d tail_gyro = Eigen::Vector3d::Zero();
+    Sophus::SO3d tail_rotation;
+    if (_window_started && _marginalization_enabled)
+    {
+        tail_position = _position_spline.Evaluate(_window_end_time);
+        tail_velocity = _position_spline.Velocity(_window_end_time);
+        tail_acceleration = _position_spline.Acceleration(_window_end_time);
+        tail_rotation = _attitude_spline.Evaluate(_window_end_time);
+        tail_gyro = _attitude_spline.VelocityBody(_window_end_time);
+    }
+    double shift = std::floor((end_time - duration_s - start_time) / _knot_interval);
+    if (shift > 0.0)
+    {
+        std::size_t old_count = candidate._position_spline.GetKnots().size();
+        if (shift > static_cast<double>(old_count - (SplineOrder - 1)))
+        {
+            throw std::invalid_argument("CT update interval lost the three retained boundary knots");
+        }
+        std::size_t remove_count = static_cast<std::size_t>(shift);
+        for (std::size_t i = 0; i < remove_count; i++)
+        {
+            candidate._position_spline.KnotsPopFront();
+            candidate._attitude_spline.KnotsPopFront();
+        }
+        if (_marginalization_enabled)
+        {
+            if (_pending_prior.blocks.empty()
+                || std::abs(_pending_prior.start_time - candidate._position_spline.MinTime()) > 1e-8)
+            {
+                throw std::logic_error("CT sliding requires a marginalization prior for the new window");
+            }
+            candidate._marginalization_prior = _pending_prior;
+            candidate._pending_prior = CtMarginalizationPrior();
+            candidate._fixed_prefix_knots = 0;
+        }
+        else
+        {
+            candidate._fixed_prefix_knots = SplineOrder - 1;
+        }
+    }
+    while (candidate._position_spline.MaxTime() <= end_time)
+    {
+        int last = static_cast<int>(candidate._position_spline.GetKnots().size()) - 1;
+        Eigen::Vector3d next_position = 2.0 * candidate._position_spline.GetKnot(last)
+            - candidate._position_spline.GetKnot(last - 1);
+        Sophus::SO3d last_rotation = candidate._attitude_spline.GetKnot(last);
+        Sophus::SO3d delta_rotation = candidate._attitude_spline.GetKnot(last - 1).inverse() * last_rotation;
+        Sophus::SO3d next_rotation = last_rotation * delta_rotation;
+        if (_window_started && _marginalization_enabled)
+        {
+            // Use the last observed state; an unobserved tail knot can carry an arbitrary increment.
+            double knot_time = candidate._position_spline.MinTime() + last * _knot_interval;
+            double delta_time = knot_time - _window_end_time;
+            next_position = tail_position + delta_time * tail_velocity
+                + (0.5 * delta_time * delta_time - _knot_interval * _knot_interval / 6.0) * tail_acceleration;
+            next_rotation = tail_rotation * Sophus::SO3d::exp(delta_time * tail_gyro);
+        }
+        candidate._position_spline.KnotsPushBack(next_position);
+        candidate._attitude_spline.KnotsPushBack(next_rotation);
+    }
+    start_time = candidate._position_spline.MinTime();
+    std::size_t imu_begin = 0;
+    while (imu_begin < candidate._imu_data.size() && candidate._imu_data[imu_begin].time_s < start_time)
+    {
+        imu_begin++;
+    }
+    candidate._imu_data.erase(candidate._imu_data.begin(), candidate._imu_data.begin() + imu_begin);
+    // Keep one preceding GNSS record so stream-order checks also survive a GNSS outage.
+    std::size_t gnss_begin = 0;
+    while (gnss_begin + 1 < candidate._gnss_data.size()
+        && candidate._gnss_data[gnss_begin + 1].time_s < start_time)
+    {
+        gnss_begin++;
+    }
+    candidate._gnss_data.erase(candidate._gnss_data.begin(), candidate._gnss_data.begin() + gnss_begin);
+    CtGinsSolveResult result = candidate.Solve(options);
+    if (result.usable)
+    {
+        candidate._window_started = true;
+        candidate._window_end_time = end_time;
+        *this = std::move(candidate);
+    }
+    return result;
+}
+
+void CtGinsBackend::EnableMarginalization(bool enabled)
+{
+    if (_window_started)
+    {
+        throw std::logic_error("CT marginalization mode must be selected before the first window");
+    }
+    _marginalization_enabled = enabled;
+}
+
+const CtMarginalizationPrior& CtGinsBackend::GetMarginalizationPrior() const
+{
+    return _marginalization_prior;
+}
+
+void CtGinsBackend::SetPendingMarginalization(const CtMarginalizationPrior& prior)
+{
+    int columns = 3 * static_cast<int>(prior.blocks.size());
+    if (!_marginalization_enabled || prior.blocks.empty() || !std::isfinite(prior.start_time)
+        || prior.jacobian.cols() != columns || prior.jacobian.rows() != prior.residual.size()
+        || prior.residual.size() == 0 || !prior.jacobian.allFinite() || !prior.residual.allFinite())
+    {
+        throw std::invalid_argument("Invalid CT marginalization prior dimensions or values");
+    }
+    for (std::size_t i = 0; i < prior.blocks.size(); i++)
+    {
+        const CtMarginalizationBlock& block = prior.blocks[i];
+        if (!block.value.allFinite() || block.type < CtMarginalizationBlock::ROTATION
+            || block.type > CtMarginalizationBlock::ACCEL_BIAS || block.knot < 0
+            || ((block.type == CtMarginalizationBlock::ROTATION || block.type == CtMarginalizationBlock::POSITION)
+                && static_cast<std::size_t>(block.knot) >= _position_spline.GetKnots().size()))
+        {
+            throw std::invalid_argument("Invalid CT marginalization block");
+        }
+        if (block.type == CtMarginalizationBlock::ROTATION && std::abs(block.value.norm() - 1.0) > 1e-8)
+        {
+            throw std::invalid_argument("CT marginalization quaternion must have unit norm");
+        }
+    }
+    _pending_prior = prior;
+}
+
+bool CtGinsBackend::LinearizeMarginalization(double duration_s, const CtGinsSolveOptions& options,
+    CtMarginalizationSystem& system) const
+{
+    system = CtMarginalizationSystem();
+    if (!_marginalization_enabled || !_window_started)
+    {
+        return false;
+    }
+    if (!std::isfinite(duration_s) || duration_s < 2.0 * _knot_interval)
+    {
+        throw std::invalid_argument("Invalid CT marginalization window duration");
+    }
+    double start_time = _position_spline.MinTime();
+    double shift = std::floor((_imu_data.back().time_s - duration_s - start_time) / _knot_interval);
+    if (shift <= 0.0)
+    {
+        return false;
+    }
+    std::size_t knot_count = _position_spline.GetKnots().size();
+    if (shift > static_cast<double>(knot_count - (SplineOrder - 1)))
+    {
+        throw std::invalid_argument("CT marginalization update lost its overlap");
+    }
+    std::size_t remove_count = static_cast<std::size_t>(shift);
+    double next_start = start_time;
+    for (std::size_t i = 0; i < remove_count; i++)
+    {
+        next_start += _knot_interval;
+    }
+    RdSpline<3, SplineOrder> position_spline = _position_spline;
+    So3Spline<SplineOrder> attitude_spline = _attitude_spline;
+    position_spline.SetStartTime(0.0);
+    attitude_spline.SetStartTime(0.0);
+    Eigen::Vector3d gyro_bias = _gyro_bias;
+    Eigen::Vector3d accel_bias = _accel_bias;
+    Eigen::Vector3d gravity = _gravity;
+    ceres::EigenQuaternionManifold manifold;
+    ceres::Problem::Options problem_options;
+    problem_options.manifold_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+    ceres::Problem problem(problem_options);
+    // Only factors leaving this window are absorbed. Overlap measurements stay raw.
+    for (std::size_t i = 0; i < _imu_data.size(); i++)
+    {
+        CtImuSample sample = _imu_data[i];
+        if (sample.time_s < start_time || sample.time_s >= next_start)
+        {
+            continue;
+        }
+        sample.time_s -= start_time;
+        SplineMeta<SplineOrder> meta;
+        std::vector<double*> blocks;
+        sample.time_s = GetLocalBlocks(position_spline, attitude_spline, sample.time_s, meta, blocks);
+        std::vector<double*> gyro_blocks(blocks.begin(), blocks.begin() + SplineOrder);
+        gyro_blocks.push_back(gyro_bias.data());
+        problem.AddResidualBlock(IMUGyroFactorWithConstBias<SplineOrder>::Create(
+            meta, sample, 1.0 / options.gyro_std_rad_s), nullptr, gyro_blocks);
+        blocks.push_back(accel_bias.data());
+        blocks.push_back(gravity.data());
+        problem.AddResidualBlock(IMUAcceFactorWithConstBias<SplineOrder>::Create(
+            meta, meta, sample, 1.0 / options.accel_std_m_s2), nullptr, blocks);
+        system.imu_samples++;
+    }
+    for (std::size_t i = 0; i < _gnss_data.size(); i++)
+    {
+        CtGnssPosition observation = _gnss_data[i];
+        if (observation.time_s < start_time || observation.time_s >= next_start)
+        {
+            continue;
+        }
+        observation.time_s -= start_time;
+        SplineMeta<SplineOrder> meta;
+        std::vector<double*> blocks;
+        observation.time_s = GetLocalBlocks(position_spline, attitude_spline, observation.time_s, meta, blocks);
+        problem.AddResidualBlock(CtGnssPositionFactor<SplineOrder>::Create(
+            meta, meta, observation, _lever_arm, _position_origin), nullptr, blocks);
+        system.gnss_positions++;
+    }
+    if (!_marginalization_prior.blocks.empty())
+    {
+        AddMarginalizationPrior(problem, _marginalization_prior, position_spline, attitude_spline,
+            gyro_bias, accel_bias);
+    }
+    else
+    {
+        SplineMeta<SplineOrder> meta;
+        std::vector<double*> blocks;
+        GetLocalBlocks(position_spline, attitude_spline, 0.0, meta, blocks);
+        blocks.resize(SplineOrder);
+        std::vector<int> sizes(SplineOrder, 4);
+        problem.AddResidualBlock(ct_imu_detail::MakeCost(new InitialAttitudePrior(
+            _initial_rotation, _knot_interval, options.initial_attitude_std_rad), sizes), nullptr, blocks);
+    }
+    // Calibration bias priors remain in Solve(); absorbing them here would count them twice.
+    if (problem.HasParameterBlock(gravity.data()))
+    {
+        problem.SetParameterBlockConstant(gravity.data());
+    }
+    for (std::size_t i = 0; i < knot_count; i++)
+    {
+        double* rotation = attitude_spline.GetKnot(static_cast<int>(i)).data();
+        if (problem.HasParameterBlock(rotation))
+        {
+            problem.SetManifold(rotation, &manifold);
+        }
+    }
+    ceres::Problem::EvaluateOptions evaluate_options;
+    evaluate_options.num_threads = options.num_threads;
+    evaluate_options.apply_loss_function = false;
+    // Explicit ordering avoids pointer-sized indices and maps surviving knots after cropping.
+    for (int pass = 0; pass < 2; pass++)
+    {
+        for (std::size_t i = 0; i < knot_count; i++)
+        {
+            bool dropped = i < remove_count;
+            if (dropped != (pass == 0))
+            {
+                continue;
+            }
+            for (int type = 0; type < 2; type++)
+            {
+                double* block = type == 0 ? attitude_spline.GetKnot(static_cast<int>(i)).data()
+                    : position_spline.GetKnot(static_cast<int>(i)).data();
+                if (!problem.HasParameterBlock(block))
+                {
+                    continue;
+                }
+                evaluate_options.parameter_blocks.push_back(block);
+                if (dropped)
+                {
+                    system.marginalized_size += 3;
+                }
+                else
+                {
+                    CtMarginalizationBlock kept;
+                    kept.type = type == 0 ? CtMarginalizationBlock::ROTATION : CtMarginalizationBlock::POSITION;
+                    kept.knot = static_cast<int>(i - remove_count);
+                    kept.value.head<3>() = Eigen::Map<Eigen::Vector3d>(block);
+                    if (type == 0)
+                    {
+                        kept.value[3] = block[3];
+                    }
+                    system.prior.blocks.push_back(kept);
+                }
+            }
+        }
+    }
+    for (int i = 0; i < 2; i++)
+    {
+        double* bias = i == 0 ? gyro_bias.data() : accel_bias.data();
+        if (problem.HasParameterBlock(bias))
+        {
+            evaluate_options.parameter_blocks.push_back(bias);
+            CtMarginalizationBlock kept;
+            kept.type = i == 0 ? CtMarginalizationBlock::GYRO_BIAS : CtMarginalizationBlock::ACCEL_BIAS;
+            kept.value.head<3>() = Eigen::Map<Eigen::Vector3d>(bias);
+            system.prior.blocks.push_back(kept);
+        }
+    }
+    std::vector<double> residuals;
+    ceres::CRSMatrix sparse_jacobian;
+    double cost = 0.0;
+    if (!problem.Evaluate(evaluate_options, &cost, &residuals, nullptr, &sparse_jacobian)
+        || !std::isfinite(cost) || sparse_jacobian.num_cols != 3 * evaluate_options.parameter_blocks.size())
+    {
+        throw std::runtime_error("CT marginalization linearization failed");
+    }
+    Eigen::MatrixXd jacobian = Eigen::MatrixXd::Zero(sparse_jacobian.num_rows, sparse_jacobian.num_cols);
+    for (int row = 0; row < sparse_jacobian.num_rows; row++)
+    {
+        for (int j = sparse_jacobian.rows[row]; j < sparse_jacobian.rows[row + 1]; j++)
+        {
+            jacobian(row, sparse_jacobian.cols[j]) = sparse_jacobian.values[j];
+        }
+    }
+    Eigen::Map<const Eigen::VectorXd> error(residuals.data(), residuals.size());
+    system.hessian = jacobian.transpose() * jacobian;
+    system.gradient = jacobian.transpose() * error;
+    system.prior.start_time = next_start;
+    if (!system.hessian.allFinite() || !system.gradient.allFinite() || system.prior.blocks.empty())
+    {
+        throw std::runtime_error("CT marginalization produced an invalid normal system");
+    }
+    return true;
 }
 
 CtGinsSolveResult CtGinsBackend::Solve(const CtGinsSolveOptions& options)
@@ -363,21 +752,30 @@ CtGinsSolveResult CtGinsBackend::Solve(const CtGinsSolveOptions& options)
         problem.AddResidualBlock(cost, nullptr, blocks);
         result.gnss_positions_used++;
     }
-    if (result.imu_samples_used < 2 || result.gnss_positions_used < 2)
+    bool have_prior = !_marginalization_prior.blocks.empty();
+    if (result.imu_samples_used < 2 || (_fixed_prefix_knots == 0 && !have_prior && result.gnss_positions_used < 2))
     {
         throw std::invalid_argument("CT joint solve requires at least two IMU and two GNSS observations inside the spline interval");
     }
 
     // Repeated solves keep bias priors centred on the calibration/alignment values.
-    SplineMeta<SplineOrder> initial_meta;
-    std::vector<double*> attitude_blocks;
-    GetLocalBlocks(position_spline, attitude_spline, 0.0, initial_meta, attitude_blocks);
-    attitude_blocks.resize(SplineOrder);
-    std::vector<int> sizes(SplineOrder, 4);
-    InitialAttitudePrior* attitude_prior = new InitialAttitudePrior(
-        _initial_rotation, _knot_interval, options.initial_attitude_std_rad);
-    ceres::CostFunction* attitude_cost = ct_imu_detail::MakeCost(attitude_prior, sizes);
-    problem.AddResidualBlock(attitude_cost, nullptr, attitude_blocks);
+    if (have_prior)
+    {
+        AddMarginalizationPrior(problem, _marginalization_prior, position_spline, attitude_spline,
+            gyro_bias, accel_bias);
+    }
+    else if (_fixed_prefix_knots == 0)
+    {
+        SplineMeta<SplineOrder> initial_meta;
+        std::vector<double*> attitude_blocks;
+        GetLocalBlocks(position_spline, attitude_spline, 0.0, initial_meta, attitude_blocks);
+        attitude_blocks.resize(SplineOrder);
+        std::vector<int> sizes(SplineOrder, 4);
+        InitialAttitudePrior* attitude_prior = new InitialAttitudePrior(
+            _initial_rotation, _knot_interval, options.initial_attitude_std_rad);
+        ceres::CostFunction* attitude_cost = ct_imu_detail::MakeCost(attitude_prior, sizes);
+        problem.AddResidualBlock(attitude_cost, nullptr, attitude_blocks);
+    }
     problem.AddResidualBlock(new VectorPrior(_initial_gyro_bias,
         options.gyro_bias_prior_std_rad_s), nullptr, gyro_bias.data());
     problem.AddResidualBlock(new VectorPrior(_initial_accel_bias,
@@ -389,6 +787,15 @@ CtGinsSolveResult CtGinsBackend::Solve(const CtGinsSolveOptions& options)
         if (problem.HasParameterBlock(knot))
         {
             problem.SetManifold(knot, &quaternion_manifold);
+            if (i < static_cast<std::size_t>(_fixed_prefix_knots))
+            {
+                problem.SetParameterBlockConstant(knot);
+            }
+        }
+        double* position = position_spline.GetKnot(static_cast<int>(i)).data();
+        if (i < static_cast<std::size_t>(_fixed_prefix_knots) && problem.HasParameterBlock(position))
+        {
+            problem.SetParameterBlockConstant(position);
         }
     }
 

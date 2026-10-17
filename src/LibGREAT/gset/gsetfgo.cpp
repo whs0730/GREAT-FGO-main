@@ -319,6 +319,45 @@ namespace gfgo
 		}
 	}
 
+	double t_gsetfgo::ct_window_sec()
+	{
+		_gmutex.lock();
+		string x = _doc.child(XMLKEY_ROOT).child(XMLKEY_FGO).child_value("ct_window_sec");
+		_gmutex.unlock();
+		str_erase(x);
+		if (x.empty())
+		{
+			return 0.0;
+		}
+		return std::stod(x);
+	}
+
+	double t_gsetfgo::ct_update_sec()
+	{
+		_gmutex.lock();
+		string x = _doc.child(XMLKEY_ROOT).child(XMLKEY_FGO).child_value("ct_update_sec");
+		_gmutex.unlock();
+		str_erase(x);
+		if (x.empty())
+		{
+			return 1.0;
+		}
+		return std::stod(x);
+	}
+
+	double t_gsetfgo::ct_knot_sec()
+	{
+		_gmutex.lock();
+		string x = _doc.child(XMLKEY_ROOT).child(XMLKEY_FGO).child_value("ct_knot_sec");
+		_gmutex.unlock();
+		str_erase(x);
+		if (x.empty())
+		{
+			return 0.0;
+		}
+		return std::stod(x);
+	}
+
 	int t_gsetfgo::estimate_extrinsic()
 	{
 		_gmutex.lock();

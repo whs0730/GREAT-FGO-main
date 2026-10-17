@@ -25,6 +25,7 @@
 #include <vector>
 #include "gmsf/gpublish.h"
 #include "gfactor/gpose_local_parameterization.h"
+#include "gct/ct_gins_backend.h"
 
 
 namespace gfgomsf
@@ -63,6 +64,7 @@ namespace gfgomsf
 		 * Sets up optimization states, IMU pre-integration buffers, and result publishing
 		 */
 		t_gfgo_gins(string site, string site_base, t_gsetbase* gset, std::shared_ptr<spdlog::logger> spdlog, t_gallproc* allproc);/// initialization of parameters for factor graph based multi_sensor fusion solution
+		~t_gfgo_gins() override;
 
 		virtual void init() {}				/// the same name function of t_gsinskf
 		virtual void set_Hk() {}			/// the same name function of t_gsinskf
@@ -317,6 +319,9 @@ namespace gfgomsf
 		int _opt_valid ;
 	protected:
 		double _cur_node_time = -1;
+		gct::CtGinsBackend _ct_backend;
+		gct::CtGinsSolveOptions _ct_solve_options;
+		double _ct_window_duration = 0.0;
 		//int _rover_count = -1;
 		double _last_pre_integration_time = -1;             ///last pre integration  time
 		bool _opt_flag = false;

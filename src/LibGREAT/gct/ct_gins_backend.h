@@ -2,6 +2,7 @@
 #define GCT_GINS_BACKEND_H
 
 #include "gct/ct_types.h"
+#include "gct/ct_marginalization.h"
 #include "gct/gspline/rd_spline.h"
 #include "gct/gspline/so3_spline.h"
 #include <Eigen/Geometry>
@@ -64,7 +65,8 @@ public:
     // Lever arm: IMU -> antenna in body metres. Gravity is a fixed ECEF vector.
     void SetParameters(double knot_interval_s, const Eigen::Vector3d& lever_arm_body_m,const Eigen::Vector3d& gravity_ecef_m_s2);
     // Each sensor stream requires increasing timestamps on the shared seconds axis.
-    // New observations or SetParameters() invalidate the initialized trajectory.
+    // In window mode, appended data keep the last trajectory available until SolveWindow().
+    // In batch mode, new observations invalidate the initialized trajectory.
     void AddImuSample(const CtImuSample& sample);
     void AddGnssPosition(const CtGnssPosition& observation);
     void ClearData();
@@ -78,6 +80,19 @@ public:
     // Requires SetParameters() and Initialize(); gravity and lever arm stay fixed.
     // Only a usable result replaces the stored trajectory and biases.
     CtGinsSolveResult Solve(const CtGinsSolveOptions& options = CtGinsSolveOptions());
+    // Advances to the latest IMU time, retaining a knot-aligned interval of this length.
+    // Call the first time within duration+dt of the first common observation.
+    // Retained knots and biases warm-start the solve. Without marginalization enabled,
+    // the first three retained knots are fixed after sliding.
+    // An unusable solve preserves the previous trajectory and buffered observations.
+    CtGinsSolveResult SolveWindow(double duration_s, const Eigen::Quaterniond& initial_rotation,
+        const CtGinsSolveOptions& options = CtGinsSolveOptions());
+    // Enable before the first window. The caller must supply a prior before each slide.
+    void EnableMarginalization(bool enabled);
+    bool LinearizeMarginalization(double duration_s, const CtGinsSolveOptions& options,
+        CtMarginalizationSystem& system) const;
+    void SetPendingMarginalization(const CtMarginalizationPrior& prior);
+    const CtMarginalizationPrior& GetMarginalizationPrior() const;
     // Tracks an accepted solution, not the success of the latest Solve() call.
     bool IsSolved() const;
     // Query interval is [MinTime(), MaxTime()); covers the observation overlap end.
@@ -102,6 +117,12 @@ private:
     bool _initialized;
     bool _parameters_set;
     bool _solved;
+    bool _window_started;
+    int _fixed_prefix_knots;
+    bool _marginalization_enabled;
+    double _window_end_time;
+    CtMarginalizationPrior _marginalization_prior;
+    CtMarginalizationPrior _pending_prior;
     Eigen::Vector3d _position_origin;
     Eigen::Vector3d _lever_arm;
     Eigen::Vector3d _gravity;

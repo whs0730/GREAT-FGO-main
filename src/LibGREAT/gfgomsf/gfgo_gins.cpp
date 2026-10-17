@@ -43,6 +43,8 @@ gfgomsf::t_gfgo_gins::t_gfgo_gins(string site, string site_base, t_gsetbase* gse
 	_publish_result.Initialize();
 }
 
+gfgomsf::t_gfgo_gins::~t_gfgo_gins() = default;
+
 int gfgomsf::t_gfgo_gins::ProcessBatch(const t_gtime& beg, const t_gtime& end, bool beg_end)
 {
 #ifdef BMUTEX   
@@ -209,6 +211,26 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 		{
 			throw std::invalid_argument("CT position fusion requires GNSS Type=LCI and positive input frequencies");
 		}
+		gfgo::t_gsetfgo* fgo_settings = dynamic_cast<gfgo::t_gsetfgo*>(_setkf);
+		double window_duration = fgo_settings->ct_window_sec();
+		double update_interval = fgo_settings->ct_update_sec();
+		double knot_interval = fgo_settings->ct_knot_sec();
+		if (!std::isfinite(window_duration) || window_duration < 0.0
+			|| !std::isfinite(knot_interval) || knot_interval < 0.0)
+		{
+			throw std::invalid_argument("CT window and knot intervals must be finite and nonnegative");
+		}
+		if (knot_interval == 0.0)
+		{
+			knot_interval = _sampling;
+		}
+		bool window_mode = window_duration > 0.0;
+		if (window_mode && (window_duration < 2.0 * knot_interval
+			|| !std::isfinite(update_interval) || update_interval < 1.0 / _shm.freq
+			|| update_interval > window_duration))
+		{
+			throw std::invalid_argument("CT window requires duration >= 2*dt and IMU interval <= update <= duration");
+		}
 		gct::CtGinsSolveOptions options;
 		options.gyro_std_rad_s = _gyr_n;
 		options.accel_std_m_s2 = _acc_n;
@@ -245,7 +267,11 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 		// CT factors consume individual decoded increments, without resampling.
 		_shm.nSamples = 1;
 		double sample_interval = 1.0 / static_cast<double>(_shm.freq);
-		gct::CtGinsBackend backend;
+		gct::CtGinsBackend& backend = _ct_backend;
+		backend.ClearData();
+		backend.EnableMarginalization(window_mode);
+		_ct_solve_options = options;
+		_ct_window_duration = window_duration;
 		std::vector<t_gposdata::data_pos> gnss_results;
 		std::vector<double> gnss_ratios;
 		t_gposdata::data_pos latest_position = {};
@@ -255,168 +281,233 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 		bool have_position = false;
 		bool trajectory_started = false;
 		Eigen::Quaterniond initial_rotation = Eigen::Quaterniond::Identity();
-		while (_imudata->load(_wm, _vm, _shm.t, _shm.ts, 1, true))
+		double next_solve_time = 0.0;
+		double first_output_time = 0.0;
+		double last_solved_time = -1.0;
+		double origin_sow = beg.sow() + beg.dsec();
+		std::size_t output_count = 0;
+		std::size_t window_count = 0;
+		std::size_t imu_count = 0;
+		std::size_t gnss_count = 0;
+		while (true)
 		{
-			_imu_crt = t_gtime(beg.gwk(), _shm.t);
-			_ins_crt = _imu_crt;
-			if (_imu_crt < beg || _shm.t < ins_settings->start())
+			bool loaded = _imudata->load(_wm, _vm, _shm.t, _shm.ts, 1, true);
+			if (loaded)
 			{
-				continue;
-			}
-			if (_imu_crt > end || _shm.t > ins_settings->end())
-			{
-				break;
-			}
-			if (_aligned && !trajectory_started)
-			{
-				// Propagate the initial INS attitude until CT observation collection starts.
-				sins.Update(_wm, _vm, _shm);
-			}
-			// _time_valid sets the actual GNSS epoch; process it once as IMU time advances.
-			t_gtime candidate = _gobs->load(_site, _shm.t);
-			bool new_position = false;
-			if (candidate >= beg && candidate <= end
-				&& (!have_processed_epoch || candidate > last_processed)
-				&& _time_valid(_gnss_crt, _imu_crt))
-			{
-				last_processed = _gnss_crt;
-				have_processed_epoch = true;
-				t_gposdata::data_pos position = {};
-				MEAS_TYPE measurement = _getPOS(position);
-				if (measurement != NO_MEAS)
+				_imu_crt = t_gtime(beg.gwk(), _shm.t);
+				_ins_crt = _imu_crt;
+				if (_imu_crt < beg || _shm.t < ins_settings->start())
 				{
-					gct::CtGnssPosition observation;
-					// Both sensors use seconds relative to beg, retaining their own observation times.
-					observation.time_s = _gnss_crt.diff(beg);
-					observation.position_ecef_m = position.pos;
-					observation.position_covariance_ecef_m2 = position.Rpos.asDiagonal();
-					if (observation.IsValid() && position.vn.allFinite())
-					{
-						latest_position = position;
-						latest_position.t = observation.time_s;
-						latest_ratio = _ambfix != nullptr ? _ambfix->get_ratio() : 0.0;
-						have_position = true;
-						new_position = true;
-					}
+					continue;
+				}
+				if (_imu_crt > end || _shm.t > ins_settings->end())
+				{
+					loaded = false;
 				}
 			}
-			if (!_aligned && have_position)
+			if (loaded)
 			{
-				_aligned = cascaded_align(latest_position.pos, latest_position.vn);
-			}
-			if (!_aligned || !have_position)
-			{
-				continue;
+				if (_aligned && !trajectory_started)
+				{
+					// Propagate the initial INS attitude until CT observation collection starts.
+					sins.Update(_wm, _vm, _shm);
+				}
+				// _time_valid sets the actual GNSS epoch; process it once as IMU time advances.
+				t_gtime candidate = _gobs->load(_site, _shm.t);
+				bool new_position = false;
+				if (candidate >= beg && candidate <= end
+					&& (!have_processed_epoch || candidate > last_processed)
+					&& _time_valid(_gnss_crt, _imu_crt))
+				{
+					last_processed = _gnss_crt;
+					have_processed_epoch = true;
+					t_gposdata::data_pos position = {};
+					MEAS_TYPE measurement = _getPOS(position);
+					if (measurement != NO_MEAS)
+					{
+						gct::CtGnssPosition observation;
+						// Both sensors use seconds relative to beg, retaining their own observation times.
+						observation.time_s = _gnss_crt.diff(beg);
+						observation.position_ecef_m = position.pos;
+						observation.position_covariance_ecef_m2 = position.Rpos.asDiagonal();
+						if (observation.IsValid() && position.vn.allFinite())
+						{
+							latest_position = position;
+							latest_position.t = observation.time_s;
+							latest_ratio = _ambfix != nullptr ? _ambfix->get_ratio() : 0.0;
+							have_position = true;
+							new_position = true;
+						}
+					}
+				}
+				if (!_aligned && have_position)
+				{
+					_aligned = cascaded_align(latest_position.pos, latest_position.vn);
+				}
+				if (!_aligned || !have_position)
+				{
+					continue;
+				}
+				if (!trajectory_started)
+				{
+					Eigen::Vector3d blh = Cart2Geod(latest_position.pos, false);
+					// qnb maps body to local ENU; the attitude spline maps body to ECEF.
+					Eigen::Matrix3d body_to_ecef = t_gbase::Cen(blh) * t_gbase::q2mat(sins.qnb);
+					initial_rotation = Eigen::Quaterniond(body_to_ecef);
+					t_gearth earth;
+					earth.Update(blh, Eigen::Vector3d::Zero());
+					// Hold gravity at the initial location for the entire CT batch.
+					Eigen::Vector3d gravity_ecef = earth.Cen * earth.gn;
+					// Lever is body-frame IMU-to-antenna (m); keep the ECEF origin across windows.
+					backend.SetParameters(knot_interval, lever, gravity_ecef);
+					backend.SetInitialBiases(sins.eb, sins.db);
+					backend.AddGnssPosition(gct::CtGnssPosition::FromVariances(
+						latest_position.t, latest_position.pos, latest_position.Rpos));
+					gnss_results.push_back(latest_position);
+					gnss_ratios.push_back(latest_ratio);
+					trajectory_started = true;
+					next_solve_time = _imu_crt.diff(beg) + window_duration;
+				}
+				// Apply scale calibration; FromIncrements converts rad and m/s to rad/s and m/s^2.
+				// Biases remain in the measurements and are estimated by the backend.
+				Eigen::Vector3d delta_angle = sins.Kg.asDiagonal() * _wm.front();
+				Eigen::Vector3d delta_velocity = sins.Ka.asDiagonal() * _vm.front();
+				backend.AddImuSample(gct::CtImuSample::FromIncrements(
+					_imu_crt.diff(beg), sample_interval, delta_angle, delta_velocity));
+				if (new_position && latest_position.t > gnss_results.back().t)
+				{
+					backend.AddGnssPosition(gct::CtGnssPosition::FromVariances(
+						latest_position.t, latest_position.pos, latest_position.Rpos));
+					gnss_results.push_back(latest_position);
+					gnss_ratios.push_back(latest_ratio);
+				}
+				imu_count++;
+				if (new_position)
+				{
+					gnss_count++;
+				}
 			}
 			if (!trajectory_started)
 			{
-				Eigen::Vector3d blh = Cart2Geod(latest_position.pos, false);
-				// qnb maps body to local ENU; the attitude spline maps body to ECEF.
-				Eigen::Matrix3d body_to_ecef = t_gbase::Cen(blh) * t_gbase::q2mat(sins.qnb);
-				initial_rotation = Eigen::Quaterniond(body_to_ecef);
-				t_gearth earth;
-				earth.Update(blh, Eigen::Vector3d::Zero());
-				// Hold gravity at the initial location for the entire CT batch.
-				Eigen::Vector3d gravity_ecef = earth.Cen * earth.gn;
-				// Knot spacing follows GNSS sampling; lever is body-frame IMU-to-antenna (m).
-				backend.SetParameters(_sampling, lever, gravity_ecef);
-				backend.SetInitialBiases(sins.eb, sins.db);
-				backend.AddGnssPosition(gct::CtGnssPosition::FromVariances(
-					latest_position.t, latest_position.pos, latest_position.Rpos));
-				gnss_results.push_back(latest_position);
-				gnss_ratios.push_back(latest_ratio);
-				trajectory_started = true;
+				throw std::runtime_error("CT processing has no aligned IMU/GNSS overlap");
 			}
-			// Apply scale calibration; FromIncrements converts rad and m/s to rad/s and m/s^2.
-			// Biases remain in the measurements and are estimated by the backend.
-			Eigen::Vector3d delta_angle = sins.Kg.asDiagonal() * _wm.front();
-			Eigen::Vector3d delta_velocity = sins.Ka.asDiagonal() * _vm.front();
-			backend.AddImuSample(gct::CtImuSample::FromIncrements(
-				_imu_crt.diff(beg), sample_interval, delta_angle, delta_velocity));
-			if (new_position && latest_position.t > gnss_results.back().t)
+			double last_imu_time = backend.GetImuSamples().back().time_s;
+			if (loaded && (!window_mode || last_imu_time < next_solve_time))
 			{
-				backend.AddGnssPosition(gct::CtGnssPosition::FromVariances(
-					latest_position.t, latest_position.pos, latest_position.Rpos));
-				gnss_results.push_back(latest_position);
-				gnss_ratios.push_back(latest_ratio);
+				continue;
 			}
-		}
-		if (!trajectory_started)
-		{
-			throw std::runtime_error("CT processing has no aligned IMU/GNSS overlap");
-		}
-		// Initialize and optimize one trajectory after collecting the full batch.
-		backend.Initialize(initial_rotation);
-		std::cout << "[CT] assembled imu=" << backend.GetImuSamples().size()
-			<< " gnss=" << backend.GetGnssPositions().size()
-			<< " knot_interval=" << _sampling << " output_hz=" << output_frequency << std::endl;
-		gct::CtGinsSolveResult result = backend.Solve(options);
-		std::cout << "[CT] " << result.message
-			<< " imu_used=" << result.imu_samples_used
-			<< " gnss_used=" << result.gnss_positions_used << std::endl;
-		if (!result.usable)
-		{
-			throw std::runtime_error("CT solver did not produce a usable trajectory");
-		}
-		// Stop output at the earlier sensor endpoint, within the spline's [MinTime, MaxTime) domain.
-		double last_time = std::min(backend.GetImuSamples().back().time_s,
-			backend.GetGnssPositions().back().time_s);
-		double origin_sow = beg.sow() + beg.dsec();
-		// Align the output grid to GPS seconds of week, even when beg is fractional.
-		double first_time = std::ceil((origin_sow + backend.MinTime()) * output_frequency)
-			/ output_frequency - origin_sow;
-		std::size_t quality_index = 0;
-		std::size_t output_count = 0;
-		for (std::size_t i = 0; ; i++)
-		{
-			double time = first_time + static_cast<double>(i) / output_frequency;
-			if (time > last_time || time >= backend.MaxTime())
+			// Flush a partial final window, but never solve/output the same endpoint twice.
+			if (!loaded && window_count > 0 && last_imu_time == last_solved_time)
 			{
 				break;
 			}
-			gct::CtGinsState state = backend.GetState(time);
-			t_gtime epoch = beg + time;
-			sins.t = epoch.sow() + epoch.dsec();
-			// Populate ECEF and local ENU fields expected by the existing INS formatter.
-			sins.pos_ecef = state.position_ecef_m;
-			sins.xyz_out = state.position_ecef_m;
-			sins.pos = Cart2Geod(sins.pos_ecef, false);
-			sins.eth.Update(sins.pos, Eigen::Vector3d::Zero());
-			sins.ve = state.velocity_ecef_m_s;
-			sins.vn = sins.eth.Cne * sins.ve;
-			sins.Ceb = state.rotation_body_to_ecef.toRotationMatrix();
-			sins.Cbe = sins.Ceb.transpose();
-			sins.qeb = t_gbase::m2qua(sins.Ceb);
-			sins.Cnb = sins.eth.Cne * sins.Ceb;
-			sins.Cbn = sins.Cnb.transpose();
-			sins.qnb = t_gbase::m2qua(sins.Cnb);
-			sins.att = t_gbase::m2att(sins.Cnb);
-			sins.vb = sins.Cbn * sins.vn;
-			sins.eb = backend.GetGyroBias();
-			sins.db = backend.GetAccelBias();
-			_ins_crt = epoch;
-			while (quality_index + 1 < gnss_results.size()
-				&& gnss_results[quality_index + 1].t <= time)
+			gct::CtGinsSolveResult result;
+			if (window_mode)
 			{
-				quality_index++;
+				_gins_marginalization();
+				result = backend.SolveWindow(window_duration, initial_rotation, options);
 			}
-			const t_gposdata::data_pos& quality = gnss_results[quality_index];
-			// Frontend GNSS quality applies only at its observation epoch, not between observations.
-			bool gnss_epoch = std::abs(time - quality.t) < 1e-6;
-			// Reuse the INS formatter without the discrete solver's KML/covariance path.
-			std::ostringstream output;
-			output << '1';
-			sins.prt_sins(output);
-			output << " " << std::setw(10) << (gnss_epoch ? "CT_GNSS" : "CT_INS")
-				<< " " << std::setw(5) << (gnss_epoch ? quality.nSat : 0)
-				<< std::fixed << std::setprecision(2)
-				<< " " << std::setw(7) << (gnss_epoch ? quality.PDOP : 0.0)
-				<< " " << std::setw(8) << (gnss_epoch ? (quality.amb_state ? "Fixed" : "Float") : "NA")
-				<< " " << std::setw(8) << (gnss_epoch ? gnss_ratios[quality_index] : 0.0) << std::endl;
-			std::string line = output.str();
-			_fins->write(line.c_str(), line.size());
-			output_count++;
+			else
+			{
+				backend.Initialize(initial_rotation);
+				result = backend.Solve(options);
+			}
+			if (!result.usable)
+			{
+				throw std::runtime_error("CT solver did not produce a usable trajectory: " + result.message);
+			}
+			window_count++;
+			last_solved_time = last_imu_time;
+			if (window_mode)
+			{
+				while (next_solve_time <= last_imu_time)
+				{
+					next_solve_time += update_interval;
+				}
+			}
+			std::cout << (window_mode ? "[CT WINDOW] " : "[CT] ") << "id=" << window_count
+				<< " start=" << backend.MinTime() << " end=" << last_imu_time
+				<< " knots=" << backend.GetPositionSpline().GetKnots().size()
+				<< " imu_buffer=" << backend.GetImuSamples().size()
+				<< " gnss_buffer=" << backend.GetGnssPositions().size()
+				<< " " << result.message << " imu_used=" << result.imu_samples_used
+				<< " gnss_used=" << result.gnss_positions_used << std::endl;
+			double last_time = last_imu_time;
+			if (!window_mode)
+			{
+				last_time = std::min(last_time, backend.GetGnssPositions().back().time_s);
+			}
+			if (window_count == 1)
+			{
+				first_output_time = std::ceil((origin_sow + backend.MinTime()) * output_frequency)
+					/ output_frequency - origin_sow;
+			}
+			std::size_t quality_index = 0;
+			while (true)
+			{
+				double time = first_output_time + static_cast<double>(output_count) / output_frequency;
+				if (time > last_time || time >= backend.MaxTime())
+				{
+					break;
+				}
+				gct::CtGinsState state = backend.GetState(time);
+				t_gtime epoch = beg + time;
+				sins.t = epoch.sow() + epoch.dsec();
+				// Populate ECEF and local ENU fields expected by the existing INS formatter.
+				sins.pos_ecef = state.position_ecef_m;
+				sins.xyz_out = state.position_ecef_m;
+				sins.pos = Cart2Geod(sins.pos_ecef, false);
+				sins.eth.Update(sins.pos, Eigen::Vector3d::Zero());
+				sins.ve = state.velocity_ecef_m_s;
+				sins.vn = sins.eth.Cne * sins.ve;
+				sins.Ceb = state.rotation_body_to_ecef.toRotationMatrix();
+				sins.Cbe = sins.Ceb.transpose();
+				sins.qeb = t_gbase::m2qua(sins.Ceb);
+				sins.Cnb = sins.eth.Cne * sins.Ceb;
+				sins.Cbn = sins.Cnb.transpose();
+				sins.qnb = t_gbase::m2qua(sins.Cnb);
+				sins.att = t_gbase::m2att(sins.Cnb);
+				sins.vb = sins.Cbn * sins.vn;
+				sins.eb = backend.GetGyroBias();
+				sins.db = backend.GetAccelBias();
+				_ins_crt = epoch;
+				while (quality_index + 1 < gnss_results.size()
+					&& gnss_results[quality_index + 1].t <= time + 1e-6)
+				{
+					quality_index++;
+				}
+				const t_gposdata::data_pos& quality = gnss_results[quality_index];
+				// Frontend GNSS quality applies only at its observation epoch, not between observations.
+				bool gnss_epoch = std::abs(time - quality.t) < 1e-6;
+				// Reuse the INS formatter without the discrete solver's KML/covariance path.
+				std::ostringstream output;
+				output << '1';
+				sins.prt_sins(output);
+				output << " " << std::setw(10) << (gnss_epoch ? "CT_GNSS" : "CT_INS")
+					<< " " << std::setw(5) << (gnss_epoch ? quality.nSat : 0)
+					<< std::fixed << std::setprecision(2)
+					<< " " << std::setw(7) << (gnss_epoch ? quality.PDOP : 0.0)
+					<< " " << std::setw(8) << (gnss_epoch ? (quality.amb_state ? "Fixed" : "Float") : "NA")
+					<< " " << std::setw(8) << (gnss_epoch ? gnss_ratios[quality_index] : 0.0) << std::endl;
+				std::string line = output.str();
+				_fins->write(line.c_str(), line.size());
+				output_count++;
+			}
+			// Old quality records cannot be queried again after emitting this window.
+			if (window_mode && gnss_results.size() > 1)
+			{
+				gnss_results.erase(gnss_results.begin(), gnss_results.end() - 1);
+				gnss_ratios.erase(gnss_ratios.begin(), gnss_ratios.end() - 1);
+			}
+			if (!loaded)
+			{
+				break;
+			}
 		}
+		std::cout << "[CT] windows=" << window_count << " imu_total=" << imu_count
+			<< " gnss_total=" << gnss_count << " knot_interval=" << knot_interval
+			<< " window_sec=" << window_duration << " update_sec=" << update_interval << std::endl;
+
 		std::cout << "[CT] output_rows=" << output_count << std::endl;
 		if (output_count == 0)
 		{
@@ -1800,6 +1891,67 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 
 void gfgomsf::t_gfgo_gins::_gins_marginalization()
 {
+	if (_msf_type == MSF_TYPE::GINS_CT_MODE)
+	{
+		gct::CtMarginalizationSystem system;
+		if (!_ct_backend.LinearizeMarginalization(_ct_window_duration, _ct_solve_options, system))
+		{
+			return;
+		}
+		// CTraj/GINS Schur ordering: [marginalized | retained]. Source notice is in ct_marginalization.h.
+		int m = system.marginalized_size;
+		int n = static_cast<int>(system.gradient.size()) - m;
+		Eigen::MatrixXd hessian = system.hessian.bottomRightCorner(n, n);
+		Eigen::VectorXd gradient = system.gradient.tail(n);
+		const double eps = 1e-8;
+		if (m > 0)
+		{
+			Eigen::MatrixXd hmm = system.hessian.topLeftCorner(m, m);
+			hmm = 0.5 * (hmm + hmm.transpose()).eval();
+			Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_m(hmm);
+			if (eigen_m.info() != Eigen::Success)
+			{
+				throw std::runtime_error("CT marginalization eigendecomposition failed");
+			}
+			Eigen::VectorXd inverse = Eigen::VectorXd::Zero(m);
+			for (int i = 0; i < m; i++)
+			{
+				if (eigen_m.eigenvalues()[i] > eps)
+				{
+					inverse[i] = 1.0 / eigen_m.eigenvalues()[i];
+				}
+			}
+			Eigen::MatrixXd hmm_inverse = eigen_m.eigenvectors() * inverse.asDiagonal()
+				* eigen_m.eigenvectors().transpose();
+			Eigen::MatrixXd hnm = system.hessian.bottomLeftCorner(n, m);
+			hessian -= hnm * hmm_inverse * system.hessian.topRightCorner(m, n);
+			gradient -= hnm * hmm_inverse * system.gradient.head(m);
+		}
+		hessian = 0.5 * (hessian + hessian.transpose()).eval();
+		Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_n(hessian);
+		if (eigen_n.info() != Eigen::Success)
+		{
+			throw std::runtime_error("CT retained prior eigendecomposition failed");
+		}
+		Eigen::VectorXd square_root = Eigen::VectorXd::Zero(n);
+		Eigen::VectorXd inverse_root = Eigen::VectorXd::Zero(n);
+		for (int i = 0; i < n; i++)
+		{
+			if (eigen_n.eigenvalues()[i] > eps)
+			{
+				square_root[i] = std::sqrt(eigen_n.eigenvalues()[i]);
+				inverse_root[i] = 1.0 / square_root[i];
+			}
+		}
+		system.prior.jacobian = square_root.asDiagonal() * eigen_n.eigenvectors().transpose();
+		// g = J^T*r, so the new prior is r0 + J*dx (GINS uses b=-g and J*dx-r0).
+		system.prior.residual = inverse_root.asDiagonal() * eigen_n.eigenvectors().transpose() * gradient;
+		_ct_backend.SetPendingMarginalization(system.prior);
+		std::cout << "[CT MARG] start=" << system.prior.start_time
+			<< " marginalized_dim=" << m << " retained_dim=" << n
+			<< " imu=" << system.imu_samples << " gnss=" << system.gnss_positions << std::endl;
+		return;
+	}
 	//marginalization
 	if (_rover_count == gins_window_size)
 	{
