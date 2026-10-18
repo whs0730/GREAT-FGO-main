@@ -289,6 +289,7 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 		std::size_t window_count = 0;
 		std::size_t imu_count = 0;
 		std::size_t gnss_count = 0;
+		std::cerr << "\n" << _site << ": Start GNSS/SINS Integration Processing:" << beg.str_ymdhms() << " " << end.str_ymdhms() << endl;
 		while (true)
 		{
 			bool loaded = _imudata->load(_wm, _vm, _shm.t, _shm.ts, 1, true);
@@ -416,6 +417,7 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 			{
 				throw std::runtime_error("CT solver did not produce a usable trajectory: " + result.message);
 			}
+			cerr << "\r" << "Current Epoch: " << (_imu_crt).str_ymdhms();
 			window_count++;
 			last_solved_time = last_imu_time;
 			if (window_mode)
@@ -495,6 +497,9 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 					<< " " << std::setw(8) << (gnss_epoch ? gnss_ratios[quality_index] : 0.0) << std::endl;
 				std::string line = output.str();
 				_fins->write(line.c_str(), line.size());
+				_imu_state.orientation = Eigen::Quaterniond(t_gbase::q2mat(sins.qnb));
+				_imu_state.position = Geod2Cart(sins.pos, false);
+				_publish_result.UpdateNewState(_imu_state);
 				output_count++;
 			}
 			// Old quality records cannot be queried again after emitting this window.
@@ -517,6 +522,7 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 		{
 			throw std::runtime_error("CT trajectory contains no requested output epoch");
 		}
+		cerr << " Processing Finished!" << endl;
 		return 0;
 	}
 	catch (const std::exception& error)
