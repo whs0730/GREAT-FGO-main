@@ -437,7 +437,8 @@ CtGinsSolveResult CtGinsBackend::SolveWindow(double duration_s,const Eigen::Quat
     if (result.usable)
     {
         candidate._window_started = true;
-        candidate._window_end_time = end_time;
+        candidate._window_end_time = std::min(result.optimized_until_s,
+            std::nextafter(candidate.MaxTime(), candidate.MinTime()));
         *this = std::move(candidate);
     }
     return result;
@@ -693,6 +694,20 @@ CtGinsSolveResult CtGinsBackend::Solve(const CtGinsSolveOptions& options)
     CtGinsSolveResult result;
     double start_time = MinTime();
     double end_time = MaxTime();
+    if (_marginalization_enabled)
+    {
+        // A short final span leaves its last knot almost unconstrained. Keep these
+        // observations buffered until the full span can constrain that control point.
+        double complete_end = start_time + std::floor(
+            (_imu_data.back().time_s - start_time) / _knot_interval) * _knot_interval;
+        if (complete_end > start_time)
+        {
+            end_time = std::min(end_time,
+                std::nextafter(complete_end, std::numeric_limits<double>::infinity()));
+        }
+    }
+    result.optimized_until_s = std::min(_imu_data.back().time_s,
+        std::nextafter(end_time, start_time));
     // Solve on copies; an unusable result leaves the accepted state unchanged.
     RdSpline<3, SplineOrder> position_spline = _position_spline;
     So3Spline<SplineOrder> attitude_spline = _attitude_spline;

@@ -433,6 +433,10 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 				<< " " << result.message << " imu_used=" << result.imu_samples_used
 				<< " gnss_used=" << result.gnss_positions_used << std::endl;
 			double last_time = last_imu_time;
+			if (window_mode)
+			{
+				last_time = std::min(last_time, result.optimized_until_s);
+			}
 			if (!window_mode)
 			{
 				last_time = std::min(last_time, backend.GetGnssPositions().back().time_s);

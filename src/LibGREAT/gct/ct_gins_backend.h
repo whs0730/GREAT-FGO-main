@@ -50,6 +50,8 @@ struct CtGinsSolveResult
     // Ceres cost is half the sum of squared weighted residuals.
     double initial_cost = 0.0;
     double final_cost = 0.0;
+    // Window output must not pass the last fully supported knot span.
+    double optimized_until_s = 0.0;
     std::string message;
 };
 
