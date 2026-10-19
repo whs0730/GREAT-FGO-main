@@ -17,6 +17,18 @@ namespace gct
 namespace
 {
 
+double WindowKnotShift(double latest_time, double duration, double start_time, double interval)
+{
+    double shift = (latest_time - duration - start_time) / interval;
+    double nearest = std::round(shift);
+    // Snap roundoff at knot boundaries; partial intervals still round down.
+    if (std::abs(shift - nearest) < 1e-8)
+    {
+        shift = nearest;
+    }
+    return std::floor(shift);
+}
+
 class VectorPrior : public ceres::SizedCostFunction<3, 3>
 {
 public:
@@ -368,7 +380,7 @@ CtGinsSolveResult CtGinsBackend::SolveWindow(double duration_s,const Eigen::Quat
         tail_rotation = _attitude_spline.Evaluate(_window_end_time);
         tail_gyro = _attitude_spline.VelocityBody(_window_end_time);
     }
-    double shift = std::floor((end_time - duration_s - start_time) / _knot_interval);
+    double shift = WindowKnotShift(end_time, duration_s, start_time, _knot_interval);
     if (shift > 0.0)
     {
         std::size_t old_count = candidate._position_spline.GetKnots().size();
@@ -498,7 +510,7 @@ bool CtGinsBackend::LinearizeMarginalization(double duration_s, const CtGinsSolv
         throw std::invalid_argument("Invalid CT marginalization window duration");
     }
     double start_time = _position_spline.MinTime();
-    double shift = std::floor((_imu_data.back().time_s - duration_s - start_time) / _knot_interval);
+    double shift = WindowKnotShift(_imu_data.back().time_s, duration_s, start_time, _knot_interval);
     if (shift <= 0.0)
     {
         return false;
