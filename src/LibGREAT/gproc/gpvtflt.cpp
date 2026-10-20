@@ -2378,10 +2378,14 @@ void great::t_gpvtflt::_udsdAmb()
                     else if (_amb_obs[make_pair(sat, amb_type)] != amb_obs_identifier)
                     {
                         if (_spdlog)
-                            SPDLOG_LOGGER_INFO(_spdlog, "Warning: amb_obs switched silently!" + sat + " " + _epoch.str_hms());
-                        _amb_obs[make_pair(sat, amb_type)] = amb_obs_identifier;
+                            SPDLOG_LOGGER_INFO(_spdlog, "Phase observation changed; reinitializing ambiguity: " + sat + " " + _epoch.str_hms());
+                        // A different phase observable starts a new ambiguity even without LLI.
+                        update_amb = true;
                     }
-                    continue;
+                    if (update_amb == false)
+                    {
+                        continue;
+                    }
                 }
                 double sdamb = amb[0] - amb[1];
 
