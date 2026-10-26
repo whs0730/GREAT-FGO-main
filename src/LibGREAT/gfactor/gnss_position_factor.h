@@ -1,4 +1,4 @@
-#ifndef GNSS_POSITION_FACTOR_H
+﻿#ifndef GNSS_POSITION_FACTOR_H
 #define GNSS_POSITION_FACTOR_H
 /**
  * @file         gnss_position_factor.h
@@ -17,13 +17,13 @@ namespace gfgo
 	{
     private:
 
-        /// GNSS antenna position
+        /// GNSS 天线的 ECEF 位置（m）
         Eigen::Vector3d _gnss_position;
 
-        /// Position square-root information matrix
+        /// ECEF 位置协方差的平方根信息矩阵
         Eigen::Matrix3d _sqrt_info;
 
-        /// IMU-GNSS lever arm
+        /// 机体系下 IMU 指向天线的杆臂（m）
         Eigen::Vector3d _lever_arm;
 	public:
         GnssPositionFactor(const Eigen::Vector3d& gnss_position, const Eigen::Vector3d& position_variance, const Eigen::Vector3d& lever_arm) 
@@ -77,8 +77,6 @@ namespace gfgo
                     jacobian_pose.block<3, 3>(0, 3)
                         = -Ri *
                         t_gfgo_utility::skewSymmetric(_lever_arm);
-
-                    jacobian_pose.col(6).setZero();
 
                     jacobian_pose = _sqrt_info * jacobian_pose;
 

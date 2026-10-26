@@ -1,4 +1,4 @@
-#ifndef GREAT_GCT_CT_TYPES_H
+﻿#ifndef GREAT_GCT_CT_TYPES_H
 #define GREAT_GCT_CT_TYPES_H
 #include <Eigen/Core>
 #include <Eigen/Cholesky>
@@ -9,9 +9,8 @@
 namespace gfgomsf {
 namespace gct {
 
-// Body-frame angular rate (rad/s) and specific force (m/s^2).
-// Timestamps share a continuous seconds axis with GNSS and splines, without
-// GPS-week wrap. Calibration and axis conversion belong to the caller.
+// 机体系角速度（rad/s）与比力（m/s^2）。
+// 与 GNSS、样条共用不跨周回绕的连续秒时间轴；标定和轴转换由调用方完成。
 struct CtImuSample {
     double time_s = std::numeric_limits<double>::quiet_NaN();
     Eigen::Vector3d angular_rate_rad_s = Eigen::Vector3d::Zero();
@@ -37,7 +36,7 @@ struct CtImuSample {
         return sample;
     }
 
-    // interval_s must span these increments; axes and timestamps are not converted.
+    // interval_s 必须对应本条增量的积分时长；不转换坐标轴和时间基准。
     static CtImuSample FromIncrements(double timestamp_s, double interval_s,
                                      const Eigen::Vector3d& delta_angle_rad,
                                      const Eigen::Vector3d& delta_velocity_m_s) 
@@ -53,8 +52,7 @@ struct CtImuSample {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
-// Absolute GNSS antenna position (m) and covariance (m^2), both in ECEF.
-// Timestamps use the same continuous seconds as IMU samples and spline knots.
+// ECEF 下的 GNSS 天线绝对位置（m）与协方差（m^2），时间基准与 IMU、样条一致。
 struct CtGnssPosition {
     double time_s = std::numeric_limits<double>::quiet_NaN();
     Eigen::Vector3d position_ecef_m = Eigen::Vector3d::Zero();
@@ -69,7 +67,7 @@ struct CtGnssPosition {
         {
             return false;
         }
-        // Positive definiteness is required for covariance-based whitening.
+        // 协方差须正定，才能通过 Cholesky 分解白化残差。
         const Eigen::LLT<Eigen::Matrix3d> decomposition(position_covariance_ecef_m2);
         return decomposition.info() == Eigen::Success;
     }
@@ -90,7 +88,7 @@ struct CtGnssPosition {
         return observation;
     }
 
-    // t_gposdata::data_pos::Rpos contains ECEF variances (m^2), not standard deviations.
+    // t_gposdata::data_pos::Rpos 存放 ECEF 各轴方差（m^2），不是标准差。
     static CtGnssPosition FromVariances(double timestamp_s,
                                         const Eigen::Vector3d& position_ecef,
                                         const Eigen::Vector3d& position_variances_ecef_m2) 

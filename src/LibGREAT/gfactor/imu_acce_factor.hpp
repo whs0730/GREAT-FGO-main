@@ -1,4 +1,4 @@
-// Copyright (c) 2023. Created on 10/31/23 12:49 PM by shlchen@whu.edu.cn (Shuolong Chen), who received the B.S. degree in
+﻿// Copyright (c) 2023. Created on 10/31/23 12:49 PM by shlchen@whu.edu.cn (Shuolong Chen), who received the B.S. degree in
 // geodesy and geomatics engineering from Wuhan University, Wuhan China, in 2023. He is currently a master candidate at
 // the school of Geodesy and Geomatics, Wuhan University. His area of research currently focuses on integrated navigation
 // systems and multi-sensor fusion.
@@ -13,12 +13,9 @@
 
 namespace gfgomsf {
 
-// Position knots and gravity use the same reference frame; R maps body to it.
-// The measured specific force is R^-1 (p'' - g) + ba, in m/s^2.
-// Both variants use POSITION knots and their second derivative. A rotating
-// reference frame such as ECEF needs consistent inertial corrections in the
-// future navigation adapter/model; this factor keeps the teacher's basic model.
-// weight is scalar square-root information (inverse measurement std deviation).
+// 位置控制点和重力使用同一参考系，R 为机体系到该参考系的旋转。
+// 预测比力为 R^-1*(p''-g)+ba，单位 m/s^2；weight 为观测标准差的倒数。
+// 当前模型未加入 ECEF 旋转参考系的地球自转和科里奥利项。
 template <int Order>
 struct IMUAcceFactor {
     static_assert(Order >= 3, "Accelerometer factors require a twice differentiable spline");
@@ -36,8 +33,7 @@ struct IMUAcceFactor {
         gravity_offset_ = so3_meta.NumParameters() + pos_meta.NumParameters() + ba_meta.NumParameters();
     }
 
-    // Blocks: SO3 knots [qx,qy,qz,qw], position knots, accel-bias knots, gravity.
-    // Each block after SO3 is a 3-vector. The factory is fully configured.
+    // 参数块依次为 SO3 控制点 [qx,qy,qz,qw]、位置控制点、加计零偏控制点、重力；后三类均为三维。
     static auto Create(const SplineMetaType& so3_meta, const SplineMetaType& pos_meta,
                        const SplineMetaType& ba_meta, const gct::CtImuSample& sample, double weight) {
         std::vector<int> sizes(so3_meta.NumParameters(), 4);
@@ -90,7 +86,7 @@ struct IMUAcceFactorWithConstBias {
         gravity_offset_ = ba_offset_ + 1;
     }
 
-    // Blocks: SO3 knots [qx,qy,qz,qw], position knots, one accel bias, gravity.
+    // 参数块依次为 SO3 控制点 [qx,qy,qz,qw]、位置控制点、常量加计零偏、重力。
     static auto Create(const SplineMetaType& so3_meta, const SplineMetaType& pos_meta,
                        const gct::CtImuSample& sample, double weight) {
         std::vector<int> sizes(so3_meta.NumParameters(), 4);

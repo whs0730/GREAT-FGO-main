@@ -1,4 +1,4 @@
-#ifndef CT_GNSS_POSITION_FACTOR_H
+﻿#ifndef CT_GNSS_POSITION_FACTOR_H
 #define CT_GNSS_POSITION_FACTOR_H
 /**
  * @file         ct_gnss_position_factor.h
@@ -18,18 +18,18 @@
 
 namespace gfgomsf
 {
-    // R maps body to ECEF; position knots are IMU positions relative to a fixed origin.
+    // R 为机体系到 ECEF 的旋转，位置控制点为 IMU 相对固定 ECEF 原点的位置。
     template <int Order>
     class CtGnssPositionFactor
     {
         static_assert(Order >= 2, "CT GNSS position factors require a spline");
 
     private:
-        /// GNSS antenna position relative to the fixed ECEF origin, in metres.
+        /// GNSS 天线相对固定 ECEF 原点的位置（m）
         Eigen::Vector3d _gnss_position;
-        /// L^-1 for the ECEF covariance Sigma = L * L^T.
+        /// ECEF 协方差满足 Sigma=L*L^T，平方根信息矩阵为 L^-1
         Eigen::Matrix3d _sqrt_info;
-        /// IMU-to-GNSS lever arm in the body frame, in metres.
+        /// 机体系下 IMU 指向天线的杆臂（m）
         Eigen::Vector3d _lever_arm;
         ct_imu_detail::SplineLocation _so3_location;
         ct_imu_detail::SplineLocation _position_location;
@@ -41,10 +41,13 @@ namespace gfgomsf
                              const gct::CtGnssPosition& observation,
                              const Eigen::Vector3d& lever_arm_body_m,
                              const Eigen::Vector3d& position_origin_ecef_m = Eigen::Vector3d::Zero())
-            : _lever_arm(lever_arm_body_m), _position_offset(0)
+            : _lever_arm(lever_arm_body_m)
         {
-            if (!observation.IsValid() || !_lever_arm.allFinite()
-                || !position_origin_ecef_m.allFinite()) 
+            if (!std::isfinite(observation.time_s) || !observation.position_ecef_m.allFinite()
+                || !observation.position_covariance_ecef_m2.allFinite()
+                || !observation.position_covariance_ecef_m2.isApprox(
+                    observation.position_covariance_ecef_m2.transpose(), 1e-12)
+                || !_lever_arm.allFinite() || !position_origin_ecef_m.allFinite())
             {
                 throw std::invalid_argument("CT GNSS factor requires a valid observation, finite lever arm and origin");
             }
@@ -57,8 +60,11 @@ namespace gfgomsf
             _position_location = ct_imu_detail::Locate(position_meta, observation.time_s);
             _position_offset = so3_meta.NumParameters() + _position_location.offset;
 
-            // Sigma = L * L^T; sqrt_info = L^-1.
             const Eigen::LLT<Eigen::Matrix3d> decomposition(observation.position_covariance_ecef_m2);
+            if (decomposition.info() != Eigen::Success)
+            {
+                throw std::invalid_argument("CT GNSS covariance must be positive definite");
+            }
             Eigen::Matrix3d identity = Eigen::Matrix3d::Identity();
             _sqrt_info = decomposition.matrixL().solve(identity);
             if (!_sqrt_info.allFinite()) 
@@ -67,8 +73,7 @@ namespace gfgomsf
             }
         }
 
-        // SO3 blocks [qx,qy,qz,qw] precede 3-vector relative-position blocks.
-        // The returned cost already has its block sizes and residual count set.
+        // 参数块先放 SO3 控制点 [qx,qy,qz,qw]，再放三维相对位置控制点。
         static ceres::DynamicAutoDiffCostFunction<CtGnssPositionFactor<Order>>* Create(
                            const SplineMeta<Order>& so3_meta,
                            const SplineMeta<Order>& position_meta,
@@ -76,17 +81,8 @@ namespace gfgomsf
                            const Eigen::Vector3d& lever_arm_body_m,
                            const Eigen::Vector3d& position_origin_ecef_m = Eigen::Vector3d::Zero())
         {
-            std::vector<int> sizes;
-            std::size_t so3_count = so3_meta.NumParameters();
-            std::size_t position_count = position_meta.NumParameters();
-            for (std::size_t i = 0; i < so3_count; i++)
-            {
-                sizes.push_back(4);
-            }
-            for (std::size_t i = 0; i < position_count; i++)
-            {
-                sizes.push_back(3);
-            }
+            std::vector<int> sizes(so3_meta.NumParameters(), 4);
+            sizes.insert(sizes.end(), position_meta.NumParameters(), 3);
 
             CtGnssPositionFactor<Order>* factor = new CtGnssPositionFactor<Order>(so3_meta, position_meta, observation, lever_arm_body_m, position_origin_ecef_m);
             return ct_imu_detail::MakeCost(factor, sizes);
@@ -97,8 +93,7 @@ namespace gfgomsf
             return typeid(CtGnssPositionFactor<Order>).hash_code();
         }
 
-        // _gnss_position is z_GNSS-origin; position knots use the same origin.
-        // r = L^-1 * (p(t) + R(t)*lever - _gnss_position).
+        // 观测与位置样条使用同一原点；残差为 L^-1*(p(t)+R(t)*lever-z_GNSS)。
         template <class T>
         bool operator()(T const* const* parameters, T* residuals) const
         {

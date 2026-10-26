@@ -1,4 +1,4 @@
-#ifndef GFGO_GINS_H
+﻿#ifndef GFGO_GINS_H
 #define GFGO_GINS_H
 #define NOMINMAX
 /**
@@ -45,9 +45,7 @@ namespace gfgomsf
 		Eigen::Vector3d T;														///<Translation
 		IntegrationBase* pre_integration = nullptr;								///<Parameter integration
 		///<Whether is key frame
-		/// Loosely coupled RTK filter solution
-		bool has_lc_solution = false;											///<Whether there is a valid RTK solution
-		t_gposdata::data_pos lc_solution;										///<Keep Epoch Results
+		t_gposdata::data_pos lc_solution;										///< LC 节点对应历元的 RTK 位置解
 	};
 
 	class LibGREAT_LIBRARY_EXPORT t_gfgo_gins : virtual public t_gsinskf,
@@ -130,7 +128,6 @@ namespace gfgomsf
 		 * Sets GNSS factor availability flag for integration
 		 */
 		int _gnss_processing();								/// process gnss data 
-		//int _gnss_lc_processing();								///loosely mode process gnss data
 		virtual void _double_to_vector() {};					/// unfished
 
 		virtual void _vector_to_double() {};					/// unfished	
@@ -310,7 +307,7 @@ namespace gfgomsf
 		t_gtime _gnss_end;									///< end time of gnss
 		t_gtime _gnss_crt;
 		MEAS_TYPE _msf_flag;
-		t_gposdata::data_pos _current_lc_solution;				///< RTK filter solution for current epoch
+		t_gposdata::data_pos _current_lc_solution;				///< 当前历元的 RTK 位置解
 		t_gtime _imu_beg;										///< begin time of imu
 		t_gtime _imu_end;///< current time of gnss
 		t_gtime _imu_crt, _img_crt, _laser_crt;

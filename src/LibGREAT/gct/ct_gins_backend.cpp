@@ -1,4 +1,4 @@
-#include "gct/ct_gins_backend.h"
+﻿#include "gct/ct_gins_backend.h"
 #include "gfactor/imu_gyro_factor.hpp"
 #include "gfactor/imu_acce_factor.hpp"
 #include "gfactor/ct_gnss_position_factor.h"
@@ -21,7 +21,7 @@ double WindowKnotShift(double latest_time, double duration, double start_time, d
 {
     double shift = (latest_time - duration - start_time) / interval;
     double nearest = std::round(shift);
-    // Snap roundoff at knot boundaries; partial intervals still round down.
+    // 结点边界附近的浮点误差先吸附到整数，其余不足一段的偏移仍向下取整。
     if (std::abs(shift - nearest) < 1e-8)
     {
         shift = nearest;
@@ -56,7 +56,7 @@ private:
     double _weight;
 };
 
-// The prior constrains R(t_start), not the first quaternion control point.
+// 先验约束起始时刻的样条姿态 R(t_start)，而非第一个四元数控制点。
 struct InitialAttitudePrior
 {
     InitialAttitudePrior(const Eigen::Quaterniond& rotation, double interval, double std_dev)
@@ -81,8 +81,8 @@ struct InitialAttitudePrior
     double weight;
 };
 
-// Local blocks: four [qx,qy,qz,qw] attitude knots, then four position knots.
-// Both splines must use the same start time and knot interval.
+// 局部参数先放四个姿态控制点 [qx,qy,qz,qw]，再放四个位置控制点。
+// 两组样条必须具有相同的起始时刻和结点间隔。
 double GetLocalBlocks(RdSpline<3, CtGinsBackend::SplineOrder>& position_spline,
                     So3Spline<CtGinsBackend::SplineOrder>& attitude_spline, double time,
                     SplineMeta<CtGinsBackend::SplineOrder>& meta,
@@ -90,8 +90,7 @@ double GetLocalBlocks(RdSpline<3, CtGinsBackend::SplineOrder>& position_spline,
 {
     std::pair<double, std::size_t> location = position_spline.ComputeTIndex(time);
     double interval = position_spline.GetTimeInterval();
-    // Factors use segment-relative seconds in [0, dt).
-    // Clamp roundoff at knots; 3.4 - 17*0.2 can be slightly negative.
+    // 因子使用段内时间 [0,dt)，结点处的舍入误差可能使时间略小于 0 或达到 dt。
     double segment_time = location.first * interval;
     if (segment_time < 0.0)
     {
@@ -254,7 +253,7 @@ void CtGinsBackend::Initialize(const Eigen::Quaterniond& rotation_body_to_ecef)
         throw std::invalid_argument("CT initialization requires an overlapping time interval and representable knots");
     }
 
-    // One extra segment keeps the final observation inside the half-open interval.
+    // 多留一段，使末条观测仍位于样条的左闭右开区间内。
     double segment_count = std::floor(duration / _knot_interval) + 1.0;
     if (!std::isfinite(segment_count)|| segment_count > std::numeric_limits<int>::max() - SplineOrder + 1)
     {
@@ -262,7 +261,7 @@ void CtGinsBackend::Initialize(const Eigen::Quaterniond& rotation_body_to_ecef)
     }
     int knot_count = static_cast<int>(segment_count) + SplineOrder - 1;
     double max_time = start_time + segment_count * _knot_interval;
-    // Roundoff can place the last observation on the excluded upper bound.
+    // 舍入误差可能把末条观测放到不包含的右端点。
     if (max_time <= end_time)
     {
         if (knot_count == std::numeric_limits<int>::max())
@@ -287,8 +286,7 @@ void CtGinsBackend::Initialize(const Eigen::Quaterniond& rotation_body_to_ecef)
     std::size_t index = 0;
     for (int i = 0; i < knot_count; i++)
     {
-        // Samples at t0+(i-1)*dt reproduce constant velocity in a cubic spline.
-        // Boundary knots extrapolate the first/last GNSS segment.
+        // 三次样条在 t0+(i-1)*dt 采样可重现匀速轨迹，边界控制点沿首尾 GNSS 线段外推。
         double knot_time = start_time + (static_cast<double>(i) - 1.0) * _knot_interval;
         while (index + 2 < _gnss_data.size()&& knot_time > _gnss_data[index + 1].time_s)
         {
@@ -355,7 +353,7 @@ CtGinsSolveResult CtGinsBackend::SolveWindow(double duration_s,const Eigen::Quat
         throw std::invalid_argument("CT window requires IMU data and an initial GNSS reference");
     }
     double end_time = _imu_data.back().time_s;
-    // Prepare and solve a copy so a failed update cannot discard the last valid window.
+    // 在副本上更新窗口，求解失败时保留上一有效窗口。
     CtGinsBackend candidate = *this;
     if (!_window_started)
     {
@@ -403,7 +401,6 @@ CtGinsSolveResult CtGinsBackend::SolveWindow(double duration_s,const Eigen::Quat
             }
             candidate._marginalization_prior = _pending_prior;
             candidate._pending_prior = CtMarginalizationPrior();
-            candidate._fixed_prefix_knots = 0;
         }
         else
         {
@@ -420,7 +417,7 @@ CtGinsSolveResult CtGinsBackend::SolveWindow(double duration_s,const Eigen::Quat
         Sophus::SO3d next_rotation = last_rotation * delta_rotation;
         if (_window_started && _marginalization_enabled)
         {
-            // Use the last observed state; an unobserved tail knot can carry an arbitrary increment.
+            // 从末个受观测约束的状态外推，避免使用未受约束的尾部控制点增量。
             double knot_time = candidate._position_spline.MinTime() + last * _knot_interval;
             double delta_time = knot_time - _window_end_time;
             next_position = tail_position + delta_time * tail_velocity
@@ -437,7 +434,7 @@ CtGinsSolveResult CtGinsBackend::SolveWindow(double duration_s,const Eigen::Quat
         imu_begin++;
     }
     candidate._imu_data.erase(candidate._imu_data.begin(), candidate._imu_data.begin() + imu_begin);
-    // Keep one preceding GNSS record so stream-order checks also survive a GNSS outage.
+    // 保留窗前最后一条 GNSS 记录，失锁期间仍可检查后续观测的时间顺序。
     std::size_t gnss_begin = 0;
     while (gnss_begin + 1 < candidate._gnss_data.size()
         && candidate._gnss_data[gnss_begin + 1].time_s < start_time)
@@ -537,7 +534,7 @@ bool CtGinsBackend::LinearizeMarginalization(double duration_s, const CtGinsSolv
     ceres::Problem::Options problem_options;
     problem_options.manifold_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
     ceres::Problem problem(problem_options);
-    // Only factors leaving this window are absorbed. Overlap measurements stay raw.
+    // 仅吸收出窗因子，重叠区观测仍以原始因子参与下一窗口。
     for (std::size_t i = 0; i < _imu_data.size(); i++)
     {
         CtImuSample sample = _imu_data[i];
@@ -589,7 +586,7 @@ bool CtGinsBackend::LinearizeMarginalization(double duration_s, const CtGinsSolv
         problem.AddResidualBlock(ct_imu_detail::MakeCost(new InitialAttitudePrior(
             _initial_rotation, _knot_interval, options.initial_attitude_std_rad), sizes), nullptr, blocks);
     }
-    // Calibration bias priors remain in Solve(); absorbing them here would count them twice.
+    // 零偏标定先验仍由 Solve() 添加，此处吸收会导致重复计权。
     if (problem.HasParameterBlock(gravity.data()))
     {
         problem.SetParameterBlockConstant(gravity.data());
@@ -605,7 +602,7 @@ bool CtGinsBackend::LinearizeMarginalization(double duration_s, const CtGinsSolv
     ceres::Problem::EvaluateOptions evaluate_options;
     evaluate_options.num_threads = options.num_threads;
     evaluate_options.apply_loss_function = false;
-    // Explicit ordering avoids pointer-sized indices and maps surviving knots after cropping.
+    // 显式排列局部参数，并将保留控制点映射到裁窗后的索引。
     for (int pass = 0; pass < 2; pass++)
     {
         for (std::size_t i = 0; i < knot_count; i++)
@@ -704,12 +701,11 @@ CtGinsSolveResult CtGinsBackend::Solve(const CtGinsSolveOptions& options)
     }
 
     CtGinsSolveResult result;
-    double start_time = MinTime();
-    double end_time = MaxTime();
+    double start_time = _position_spline.MinTime();
+    double end_time = _position_spline.MaxTime();
     if (_marginalization_enabled)
     {
-        // A short final span leaves its last knot almost unconstrained. Keep these
-        // observations buffered until the full span can constrain that control point.
+        // 尾段过短时，末个控制点近乎无约束；先保留这些观测，等完整一段后再参与求解。
         double complete_end = start_time + std::floor(
             (_imu_data.back().time_s - start_time) / _knot_interval) * _knot_interval;
         if (complete_end > start_time)
@@ -720,13 +716,13 @@ CtGinsSolveResult CtGinsBackend::Solve(const CtGinsSolveOptions& options)
     }
     result.optimized_until_s = std::min(_imu_data.back().time_s,
         std::nextafter(end_time, start_time));
-    // Solve on copies; an unusable result leaves the accepted state unchanged.
+    // 在副本上求解，失败时保留已接受的轨迹和零偏。
     RdSpline<3, SplineOrder> position_spline = _position_spline;
     So3Spline<SplineOrder> attitude_spline = _attitude_spline;
     Eigen::Vector3d gyro_bias = _gyro_bias;
     Eigen::Vector3d accel_bias = _accel_bias;
     Eigen::Vector3d gravity = _gravity;
-    // Use t-start_time during assembly; restore the caller's time origin before saving.
+    // 组装因子时使用相对起点的时间，保存结果前恢复原时间基准。
     position_spline.SetStartTime(0.0);
     attitude_spline.SetStartTime(0.0);
 
@@ -785,7 +781,7 @@ CtGinsSolveResult CtGinsBackend::Solve(const CtGinsSolveOptions& options)
         throw std::invalid_argument("CT joint solve requires at least two IMU and two GNSS observations inside the spline interval");
     }
 
-    // Repeated solves keep bias priors centred on the calibration/alignment values.
+    // 反复求解时，零偏先验始终以标定或初始对准值为中心。
     if (have_prior)
     {
         AddMarginalizationPrior(problem, _marginalization_prior, position_spline, attitude_spline,
@@ -873,7 +869,7 @@ CtGinsState CtGinsBackend::GetState(double time_s) const
     {
         throw std::logic_error("CT trajectory is not initialized");
     }
-    if (!std::isfinite(time_s) || time_s < MinTime() || time_s >= MaxTime())
+    if (!std::isfinite(time_s) || time_s < _position_spline.MinTime() || time_s >= _position_spline.MaxTime())
     {
         throw std::out_of_range("CT query time is outside the spline interval");
     }

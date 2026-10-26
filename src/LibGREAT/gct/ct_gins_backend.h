@@ -1,4 +1,4 @@
-#ifndef GCT_GINS_BACKEND_H
+﻿#ifndef GCT_GINS_BACKEND_H
 #define GCT_GINS_BACKEND_H
 
 #include "gct/ct_types.h"
@@ -14,7 +14,7 @@ namespace gfgomsf
 namespace gct
 {
 
-// State at the IMU centre; rotation maps body vectors to ECEF.
+// 状态对应 IMU 中心，姿态表示机体系到 ECEF 的旋转。
 struct CtGinsState
 {
     double time_s = 0.0;
@@ -27,7 +27,7 @@ struct CtGinsState
 
 struct CtGinsSolveOptions
 {
-    // Standard deviations, not variances. IMU weights are 1/sigma per sample.
+    // 以下为标准差，IMU 每条观测的权重为 1/sigma。
     double gyro_std_rad_s = 0.01;
     double accel_std_m_s2 = 0.1;
     double gyro_bias_prior_std_rad_s = 0.01;
@@ -39,7 +39,7 @@ struct CtGinsSolveOptions
 
 struct CtGinsSolveResult
 {
-    // A usable result may reach the iteration limit without convergence.
+    // 达到迭代上限但未收敛的结果仍可能可用。
     bool usable = false;
     bool converged = false;
     std::size_t imu_samples_used = 0;
@@ -47,15 +47,15 @@ struct CtGinsSolveResult
     std::size_t imu_samples_skipped = 0;
     std::size_t gnss_positions_skipped = 0;
     int iterations = 0;
-    // Ceres cost is half the sum of squared weighted residuals.
+    // Ceres 代价为加权残差平方和的一半。
     double initial_cost = 0.0;
     double final_cost = 0.0;
-    // Window output must not pass the last fully supported knot span.
+    // 窗口输出不超过最后一个完整受观测约束的结点区间。
     double optimized_until_s = 0.0;
     std::string message;
 };
 
-// Batch continuous-time optimization with constant body-frame IMU biases.
+// 连续时间批量与滑窗优化，机体系下的 IMU 零偏在单次求解内保持常量。
 class CtGinsBackend
 {
 public:
@@ -64,40 +64,36 @@ public:
     CtGinsBackend();
     ~CtGinsBackend();
 
-    // Lever arm: IMU -> antenna in body metres. Gravity is a fixed ECEF vector.
+    // 杆臂为机体系下 IMU 指向天线的向量（m），重力为固定 ECEF 向量。
     void SetParameters(double knot_interval_s, const Eigen::Vector3d& lever_arm_body_m,const Eigen::Vector3d& gravity_ecef_m_s2);
-    // Each sensor stream requires increasing timestamps on the shared seconds axis.
-    // In window mode, appended data keep the last trajectory available until SolveWindow().
-    // In batch mode, new observations invalidate the initialized trajectory.
+    // 两路观测使用同一连续秒时间轴，各自严格递增。
+    // 滑窗模式追加观测后仍可查询旧轨迹；批量模式追加观测会使轨迹需要重新初始化。
     void AddImuSample(const CtImuSample& sample);
     void AddGnssPosition(const CtGnssPosition& observation);
     void ClearData();
 
-    // Uses the first GNSS antenna position as the ECEF origin. Position knots get
-    // GNSS-based guesses; all attitude knots start at the supplied rotation.
+    // 首条 GNSS 天线位置作为 ECEF 原点；位置控制点按 GNSS 插值或外推，姿态控制点均取给定初始旋转。
     void Initialize(const Eigen::Quaterniond& rotation_body_to_ecef);
     bool IsInitialized() const;
-    // Sets starting biases and prior centres in body-frame rad/s and m/s^2.
+    // 设置机体系零偏初值与先验中心，单位为 rad/s 和 m/s^2。
     void SetInitialBiases(const Eigen::Vector3d& gyro_bias_rad_s,const Eigen::Vector3d& accel_bias_m_s2);
-    // Requires SetParameters() and Initialize(); gravity and lever arm stay fixed.
-    // Only a usable result replaces the stored trajectory and biases.
+    // 调用前须完成 SetParameters() 与 Initialize()；求解中固定重力和杆臂，仅接受可用解。
     CtGinsSolveResult Solve(const CtGinsSolveOptions& options = CtGinsSolveOptions());
-    // Advances to the latest IMU time, retaining a knot-aligned interval of this length.
-    // Call the first time within duration+dt of the first common observation.
-    // Retained knots and biases warm-start the solve. Without marginalization enabled,
-    // the first three retained knots are fixed after sliding.
-    // An unusable solve preserves the previous trajectory and buffered observations.
+    // 窗口推进至最新 IMU 时刻，并按结点间隔裁剪到给定时长。
+    // 首次求解须在首个共同观测后的 duration+dt 内进行。
+    // 保留控制点和零偏作为初值；未启用边缘化时固定滑窗后的前三个控制点。
+    // 求解失败时保留原轨迹和观测缓存。
     CtGinsSolveResult SolveWindow(double duration_s, const Eigen::Quaterniond& initial_rotation,
         const CtGinsSolveOptions& options = CtGinsSolveOptions());
-    // Enable before the first window. The caller must supply a prior before each slide.
+    // 首窗前启用边缘化，每次裁窗前由调用方提供对应先验。
     void EnableMarginalization(bool enabled);
     bool LinearizeMarginalization(double duration_s, const CtGinsSolveOptions& options,
         CtMarginalizationSystem& system) const;
     void SetPendingMarginalization(const CtMarginalizationPrior& prior);
     const CtMarginalizationPrior& GetMarginalizationPrior() const;
-    // Tracks an accepted solution, not the success of the latest Solve() call.
+    // 表示当前是否保留已接受的解；最近一次求解失败不会清除旧解。
     bool IsSolved() const;
-    // Query interval is [MinTime(), MaxTime()); covers the observation overlap end.
+    // 查询区间为 [MinTime(),MaxTime())，包含观测重叠区间的末条观测。
     double MinTime() const;
     double MaxTime() const;
     CtGinsState GetState(double time_s) const;

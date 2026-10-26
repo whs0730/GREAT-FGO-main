@@ -1,4 +1,4 @@
-#ifndef GREAT_CT_IMU_FACTOR_COMMON_HPP
+﻿#ifndef GREAT_CT_IMU_FACTOR_COMMON_HPP
 #define GREAT_CT_IMU_FACTOR_COMMON_HPP
 
 #if defined(_WIN32)
@@ -30,8 +30,7 @@ struct SplineLocation
     double inverse_dt;
 };
 
-// Metadata must cover Order adjacent knots at the observation time.
-// Offsets count parameter blocks in preceding metadata segments.
+// 元数据须覆盖观测时刻所需的 Order 个相邻控制点，offset 按前序段的参数块数累计。
 template <int Order>
 SplineLocation Locate(const SplineMeta<Order>& meta, double time_s)
 {
@@ -84,13 +83,12 @@ inline void ValidateMeasurement(const gct::CtImuSample& sample, double weight)
     }
 }
 
-// Returned costs already define their parameter blocks and three residuals.
-// Default Ceres Problem options take ownership after AddResidualBlock.
+// 返回的代价函数包含参数块定义和三个残差，AddResidualBlock 后由 Ceres 默认接管所有权。
 template <class Functor>
 ceres::DynamicAutoDiffCostFunction<Functor>* MakeCost(
     Functor* functor, const std::vector<int>& block_sizes)
 {
-    // Retain ownership until parameter block setup succeeds.
+    // 参数块配置完成前保持所有权，构造失败时释放代价函数及其仿函数。
     std::unique_ptr<ceres::DynamicAutoDiffCostFunction<Functor>> cost(
         new ceres::DynamicAutoDiffCostFunction<Functor>(functor));
 

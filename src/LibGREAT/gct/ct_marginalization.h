@@ -1,4 +1,4 @@
-// CTraj: Continuous-Time Trajectory (Time-Varying State) Representation and Estimation Library
+﻿// CTraj: Continuous-Time Trajectory (Time-Varying State) Representation and Estimation Library
 // Copyright 2024, the School of Geodesy and Geomatics (SGG), Wuhan University, China
 // https://github.com/Unsigned-Long/CTraj.git
 //
@@ -48,7 +48,7 @@ struct CtMarginalizationBlock
     enum Type { ROTATION, POSITION, GYRO_BIAS, ACCEL_BIAS };
     Type type = POSITION;
     int knot = 0;
-    // Rotation: [qx,qy,qz,qw]; other blocks use the first three entries.
+    // 旋转存为 [qx,qy,qz,qw]，其余参数块只使用前三项。
     Eigen::Vector4d value = Eigen::Vector4d::Zero();
 };
 
@@ -62,7 +62,7 @@ struct CtMarginalizationPrior
 
 struct CtMarginalizationSystem
 {
-    // Dropped variables precede retained variables; every local block is 3D.
+    // 待边缘化变量排在保留变量之前，每个局部参数块均为三维。
     int marginalized_size = 0;
     Eigen::MatrixXd hessian;
     Eigen::VectorXd gradient;

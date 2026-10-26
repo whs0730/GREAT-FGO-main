@@ -142,7 +142,7 @@ int gfgomsf::t_gfgo_gins::ProcessBatch(const t_gtime& beg, const t_gtime& end, b
 						{
 							_set_frame_pose(_rover_count);
 
-							// The loosely coupled first node has no previous node,  IMU pre-integration is not performed
+							// 首个 LC 节点没有前驱节点，从该时刻开始累计预积分。
 							if (_last_pre_integration_time < 0.0)
 							{
 								_last_pre_integration_time= _cur_node_time;
@@ -195,7 +195,7 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 {
 	try
 	{
-		// IMU timestamps contain seconds of week; week rollover is not reconstructed.
+		// IMU 仅提供周内秒，当前适配不重建跨周时间。
 		if (!beg_end || beg >= end || beg.gwk() != end.gwk())
 		{
 			throw std::invalid_argument("CT processing requires a forward interval within one GPS week");
@@ -244,8 +244,7 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 		{
 			throw std::invalid_argument("CT initial attitude and bias standard deviations must be positive");
 		}
-		// Scalar priors use the largest configured axis standard deviation.
-		// Convert configuration units (deg, deg/h, mg) to SI for the CT factors.
+		// 标量先验取三轴标准差的最大值；配置中的 deg、deg/h、mg 转为 SI 单位。
 		options.initial_attitude_std_rad = attitude_std.maxCoeff() * t_gglv::deg;
 		options.gyro_bias_prior_std_rad_s = gyro_std.maxCoeff() * t_gglv::dph;
 		options.accel_bias_prior_std_m_s2 = accel_std.maxCoeff() * t_gglv::mg;
@@ -264,7 +263,7 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 		_gnss_end = end;
 		_gnss_crt = _gobs->beg_obs(_site);
 		lever = integration_settings->lever();
-		// CT factors consume individual decoded increments, without resampling.
+		// CT 因子逐条使用解码后的 IMU 增量，不重采样。
 		_shm.nSamples = 1;
 		double sample_interval = 1.0 / static_cast<double>(_shm.freq);
 		gct::CtGinsBackend& backend = _ct_backend;
@@ -310,10 +309,10 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 			{
 				if (_aligned && !trajectory_started)
 				{
-					// Propagate the initial INS attitude until CT observation collection starts.
+					// 开始收集 CT 观测前，先将初始姿态递推到当前 IMU 时刻。
 					sins.Update(_wm, _vm, _shm);
 				}
-				// _time_valid sets the actual GNSS epoch; process it once as IMU time advances.
+				// _time_valid 更新实际 GNSS 历元，同一历元只处理一次。
 				t_gtime candidate = _gobs->load(_site, _shm.t);
 				bool new_position = false;
 				if (candidate >= beg && candidate <= end
@@ -326,15 +325,11 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 					MEAS_TYPE measurement = _getPOS(position);
 					if (measurement != NO_MEAS)
 					{
-						gct::CtGnssPosition observation;
-						// Both sensors use seconds relative to beg, retaining their own observation times.
-						observation.time_s = _gnss_crt.diff(beg);
-						observation.position_ecef_m = position.pos;
-						observation.position_covariance_ecef_m2 = position.Rpos.asDiagonal();
-						if (observation.IsValid() && position.vn.allFinite())
+						if (position.pos.allFinite() && position.vn.allFinite()
+							&& position.Rpos.allFinite() && position.Rpos.minCoeff() > 0.0)
 						{
 							latest_position = position;
-							latest_position.t = observation.time_s;
+							latest_position.t = _gnss_crt.diff(beg);
 							latest_ratio = _ambfix != nullptr ? _ambfix->get_ratio() : 0.0;
 							have_position = true;
 							new_position = true;
@@ -352,14 +347,14 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 				if (!trajectory_started)
 				{
 					Eigen::Vector3d blh = Cart2Geod(latest_position.pos, false);
-					// qnb maps body to local ENU; the attitude spline maps body to ECEF.
+					// qnb 为机体系到 ENU 的旋转，姿态样条使用机体系到 ECEF 的旋转。
 					Eigen::Matrix3d body_to_ecef = t_gbase::Cen(blh) * t_gbase::q2mat(sins.qnb);
 					initial_rotation = Eigen::Quaterniond(body_to_ecef);
 					t_gearth earth;
 					earth.Update(blh, Eigen::Vector3d::Zero());
-					// Hold gravity at the initial location for the entire CT batch.
+					// 整段 CT 处理使用初始位置处的固定重力向量。
 					Eigen::Vector3d gravity_ecef = earth.Cen * earth.gn;
-					// Lever is body-frame IMU-to-antenna (m); keep the ECEF origin across windows.
+					// 杆臂为机体系下 IMU 指向天线的向量（m），窗口间保持同一 ECEF 原点。
 					backend.SetParameters(knot_interval, lever, gravity_ecef);
 					backend.SetInitialBiases(sins.eb, sins.db);
 					backend.AddGnssPosition(gct::CtGnssPosition::FromVariances(
@@ -369,8 +364,7 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 					trajectory_started = true;
 					next_solve_time = _imu_crt.diff(beg) + window_duration;
 				}
-				// Apply scale calibration; FromIncrements converts rad and m/s to rad/s and m/s^2.
-				// Biases remain in the measurements and are estimated by the backend.
+				// 先应用比例因子，再将增量转为角速度和比力；零偏由后端估计，不预先扣除。
 				Eigen::Vector3d delta_angle = sins.Kg.asDiagonal() * _wm.front();
 				Eigen::Vector3d delta_velocity = sins.Ka.asDiagonal() * _vm.front();
 				backend.AddImuSample(gct::CtImuSample::FromIncrements(
@@ -397,7 +391,7 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 			{
 				continue;
 			}
-			// Flush a partial final window, but never solve/output the same endpoint twice.
+			// 尾部不足一窗也要求解，同一终点只求解和输出一次。
 			if (!loaded && window_count > 0 && last_imu_time == last_solved_time)
 			{
 				break;
@@ -459,7 +453,7 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 				gct::CtGinsState state = backend.GetState(time);
 				t_gtime epoch = beg + time;
 				sins.t = epoch.sow() + epoch.dsec();
-				// Populate ECEF and local ENU fields expected by the existing INS formatter.
+				// INS 输出同时使用 ECEF 与 ENU 字段，需要同步更新两组状态。
 				sins.pos_ecef = state.position_ecef_m;
 				sins.xyz_out = state.position_ecef_m;
 				sins.pos = Cart2Geod(sins.pos_ecef, false);
@@ -483,9 +477,9 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 					quality_index++;
 				}
 				const t_gposdata::data_pos& quality = gnss_results[quality_index];
-				// Frontend GNSS quality applies only at its observation epoch, not between observations.
+				// GNSS 质量标记仅对应观测历元，不延用到历元间的 INS 输出。
 				bool gnss_epoch = std::abs(time - quality.t) < 1e-6;
-				// Reuse the INS formatter without the discrete solver's KML/covariance path.
+				// 使用 INS 文本格式输出，CT 不走离散求解器的 KML 和协方差输出路径。
 				std::ostringstream output;
 				output << '1';
 				sins.prt_sins(output);
@@ -502,8 +496,8 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 				_publish_result.UpdateNewState(_imu_state);
 				output_count++;
 			}
-			// Old quality records cannot be queried again after emitting this window.
-			if (window_mode && gnss_results.size() > 1)
+			// 已输出窗口不会再查询旧质量记录，只保留末条供后续历元使用。
+			if (window_mode)
 			{
 				gnss_results.erase(gnss_results.begin(), gnss_results.end() - 1);
 				gnss_ratios.erase(gnss_ratios.begin(), gnss_ratios.end() - 1);
@@ -1058,10 +1052,8 @@ int gfgomsf::t_gfgo_gins::_gins_processing()
 		t_gnss_node gnssNode;
 		gnssNode.pre_integration = _tmp_pre_integration;
 		
-		// Loose coupling mode: Save RTK filter solution for current epoch
 		if (_msf_type == MSF_TYPE::GINS_LC_MODE)
 		{
-			gnssNode.has_lc_solution = true;
 			gnssNode.lc_solution = _current_lc_solution;
 		}
 		_all_gnss_node.insert(make_pair(_cur_node_time, gnssNode));
@@ -1208,17 +1200,13 @@ void gfgomsf::t_gfgo_gins::_gins_feedback()
 			cout << pos.pos.transpose() << endl;
 			cout << _Ps[_rover_count].transpose() << endl;
 
-			MEAS_TYPE meas_type = meas_state();
-
 			Eigen::Vector3d mean_ba = _Bas[_rover_count];
 			Eigen::Vector3d mean_bg = _Bgs[_rover_count];
 			Eigen::Quaterniond e_q = Eigen::Quaterniond(_Rs[_rover_count]);
-			e_q.normalized();
 			sins.qeb = t_gquat(e_q.w(), e_q.x(), e_q.y(), e_q.z());
 			sins.Ceb = t_gbase::q2mat(sins.qeb);
 			sins.ve = _Vs[_rover_count];
 			sins.pos_ecef = _Ps[_rover_count];
-			//sins.pos_ecef = pos.pos;
 			sins.eb = mean_bg;
 			sins.db = mean_ba;
 			sins.qnb = t_gbase::m2qua(sins.eth.Cne) * sins.qeb;
@@ -1229,7 +1217,7 @@ void gfgomsf::t_gfgo_gins::_gins_feedback()
 			sins.xyz_out = sins.pos_ecef;
 		}
 	}
-	
+
 }
 
 void gfgomsf::t_gfgo_gins::_gravity_update()
@@ -1572,287 +1560,218 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 
 		t_tictoc fgo_gins;
 
-		int count = -1;
-		bool iter_flag = false;
+		_gins_vector_to_double();
 
+		ceres::Problem problem;
 
-		// Used to judge whether LC optimization succeeds
-		bool lc_optimization_valid = false;
-		do
+		for (int i = 0; i <= _rover_count; i++)
 		{
-			count++;
+			// 位姿参数顺序为 [px, py, pz, qx, qy, qz, qw]。
+			ceres::LocalParameterization* local_parameterization =
+				new PoseLocalParameterization();
 
-
-			//Convert state vectors to Ceres parameter arrays
-
-			_gins_vector_to_double();
-
-
-
-			//Construct Ceres problem
-			ceres::Problem problem;
-
-
-			 //Add state parameter blocks
-			for (int i = 0; i <= _rover_count; i++)
-			{
-				// Pose:
-				// [px py pz qx qy qz qw]
-				ceres::LocalParameterization* local_parameterization =
-					new PoseLocalParameterization();
-
-				problem.AddParameterBlock(
-					_para_pose[i],
-					SIZE_POSE,
-					local_parameterization
-				);
-
-				// Velocity + accelerometer bias + gyroscope bias
-				if (_imu_enable)
-				{
-					problem.AddParameterBlock(
-						_para_speed_bias[i],
-						SIZE_SPEEDBIAS
-					);
-				}
-
-				Eigen::Vector3d pos(
-					_para_pose[i][0],
-					_para_pose[i][1],
-					_para_pose[i][2]
-				);
-
-				Eigen::Quaterniond quat(
-					_para_pose[i][6],
-					_para_pose[i][3],
-					_para_pose[i][4],
-					_para_pose[i][5]
-				);
-
-				InitialPoseFactor* initial_pose =
-					new InitialPoseFactor(pos, quat);
-
-				initial_pose->sqrt_info =
-					1e-7 * Eigen::Matrix<double, 6, 6>::Identity();
-
-				problem.AddResidualBlock(
-					initial_pose,
-					NULL,
-					_para_pose[i]
-				);
-
-
-				InitialVelBiasFactor* initial_bias =
-					new InitialVelBiasFactor(
-						Eigen::Vector3d(
-							_para_speed_bias[i][0],
-							_para_speed_bias[i][1],
-							_para_speed_bias[i][2]
-						),
-						Eigen::Vector3d(
-							_para_speed_bias[i][3],
-							_para_speed_bias[i][4],
-							_para_speed_bias[i][5]
-						),
-						Eigen::Vector3d(
-							_para_speed_bias[i][6],
-							_para_speed_bias[i][7],
-							_para_speed_bias[i][8]
-						)
-					);
-
-				initial_bias->sqrt_info =
-					1e-7 * Eigen::Matrix<double, 9, 9>::Identity();
-
-				problem.AddResidualBlock(
-					initial_bias,
-					NULL,
-					_para_speed_bias[i]
-				);
-			}
-
-
-			//Marginalization prior
-
-			if (_last_marginalization_info &&
-				_last_marginalization_info->valid)
-			{
-				MarginalizationFactor* marginalization_factor =
-					new MarginalizationFactor(
-						_last_marginalization_info
-					);
-
-				problem.AddResidualBlock(
-					marginalization_factor,
-					NULL,
-					_last_marginalization_parameter_blocks
-				);
-			}
-
-
-	
-			//IMU pre-integration factors
-
-			if (_imu_enable && _rover_count > 0)
-			{
-				for (int i = 0; i < _rover_count; i++)
-				{
-					int j = i + 1;
-
-					if (_pre_integrations[j] == nullptr)
-						continue;
-
-					// Skip excessively long IMU integration intervals
-					if (_pre_integrations[j]->sum_dt > _gtime_interval)
-						continue;
-
-					IMUFactor* imu_factor =
-						new IMUFactor(_pre_integrations[j]);
-
-					problem.AddResidualBlock(
-						imu_factor,
-						NULL,
-						_para_pose[i],
-						_para_speed_bias[i],
-						_para_pose[j],
-						_para_speed_bias[j]
-					);
-				}
-			}
-
-
-			//GNSS factors
-
-			int lc_factor_count = 0;
-
-			for (int i = 0; i <= _rover_count; ++i)
-			{
-				
-				double node_time = _headers[i];
-
-				// Find RTK solution 
-				auto node_it =
-					_all_gnss_node.find(node_time);
-
-				if (node_it == _all_gnss_node.end())
-				{
-					std::cerr
-						<< "[LC WARNING] Cannot find GNSS node at time: "
-						<< std::setprecision(10)
-						<< node_time
-						<< std::endl;
-
-					continue;
-				}
-
-				if (!node_it->second.has_lc_solution)
-				{
-					std::cerr
-						<< "[LC WARNING] GNSS node has no RTK solution at time: "
-						<< std::setprecision(10)
-						<< node_time
-						<< std::endl;
-
-					continue;
-				}
-
-
-				const t_gposdata::data_pos& lc_solution =
-					node_it->second.lc_solution;
-
-
-				//Position residual:
-
-				GnssPositionFactor* position_factor =
-					new GnssPositionFactor(
-						lc_solution.pos,
-						lc_solution.Rpos,
-						lever
-					);
-
-
-				problem.AddResidualBlock(
-					position_factor,
-					NULL,
-					_para_pose[i]
-				);
-
-				lc_factor_count++;
-
-
-				std::cout
-					<< "[LC FACTOR]"
-					<< " frame=" << i
-					<< " time="
-					<< std::setprecision(10)
-					<< node_time
-					<< " rtk_pos="
-					<< lc_solution.pos.transpose()
-					<< " rtk_var="
-					<< lc_solution.Rpos.transpose()
-					<< std::endl;
-			}
-
-
-			// No RTK position factor -> no valid LC optimization
-			if (lc_factor_count == 0)
-			{
-				std::cerr
-					<< "[LC ERROR] No valid RTK position factor in current window."
-					<< std::endl;
-
-				_opt_valid = 0;
-				lc_optimization_valid = false;
-
-				break;
-			}
-
-			//Ceres optimization
-
-			ceres::Solver::Options options;
-
-			options.linear_solver_type =
-				ceres::DENSE_SCHUR;
-
-			options.trust_region_strategy_type =
-				ceres::DOGLEG;
-
-			options.max_num_iterations = 5;
-
-
-			ceres::Solver::Summary summary;
-
-
-			ceres::Solve(
-				options,
-				&problem,
-				&summary
+			problem.AddParameterBlock(
+				_para_pose[i],
+				SIZE_POSE,
+				local_parameterization
 			);
 
+			if (_imu_enable)
+			{
+				problem.AddParameterBlock(
+					_para_speed_bias[i],
+					SIZE_SPEEDBIAS
+				);
+			}
+
+			Eigen::Vector3d pos(
+				_para_pose[i][0],
+				_para_pose[i][1],
+				_para_pose[i][2]
+			);
+
+			Eigen::Quaterniond quat(
+				_para_pose[i][6],
+				_para_pose[i][3],
+				_para_pose[i][4],
+				_para_pose[i][5]
+			);
+
+			InitialPoseFactor* initial_pose =
+				new InitialPoseFactor(pos, quat);
+
+			initial_pose->sqrt_info =
+				1e-7 * Eigen::Matrix<double, 6, 6>::Identity();
+
+			problem.AddResidualBlock(
+				initial_pose,
+				NULL,
+				_para_pose[i]
+			);
+
+			InitialVelBiasFactor* initial_bias =
+				new InitialVelBiasFactor(
+					Eigen::Vector3d(
+						_para_speed_bias[i][0],
+						_para_speed_bias[i][1],
+						_para_speed_bias[i][2]
+					),
+					Eigen::Vector3d(
+						_para_speed_bias[i][3],
+						_para_speed_bias[i][4],
+						_para_speed_bias[i][5]
+					),
+					Eigen::Vector3d(
+						_para_speed_bias[i][6],
+						_para_speed_bias[i][7],
+						_para_speed_bias[i][8]
+					)
+				);
+
+			initial_bias->sqrt_info =
+				1e-7 * Eigen::Matrix<double, 9, 9>::Identity();
+
+			problem.AddResidualBlock(
+				initial_bias,
+				NULL,
+				_para_speed_bias[i]
+			);
+		}
+
+		if (_last_marginalization_info &&
+			_last_marginalization_info->valid)
+		{
+			MarginalizationFactor* marginalization_factor =
+				new MarginalizationFactor(
+					_last_marginalization_info
+				);
+
+			problem.AddResidualBlock(
+				marginalization_factor,
+				NULL,
+				_last_marginalization_parameter_blocks
+			);
+		}
+
+		if (_imu_enable)
+		{
+			for (int i = 0; i < _rover_count; i++)
+			{
+				int j = i + 1;
+
+				if (_pre_integrations[j] == nullptr)
+				{
+					continue;
+				}
+
+				// 长时间失锁后的预积分不作为相邻状态约束。
+				if (_pre_integrations[j]->sum_dt > _gtime_interval)
+				{
+					continue;
+				}
+
+				IMUFactor* imu_factor =
+					new IMUFactor(_pre_integrations[j]);
+
+				problem.AddResidualBlock(
+					imu_factor,
+					NULL,
+					_para_pose[i],
+					_para_speed_bias[i],
+					_para_pose[j],
+					_para_speed_bias[j]
+				);
+			}
+		}
+
+		int lc_factor_count = 0;
+
+		for (int i = 0; i <= _rover_count; ++i)
+		{
+
+			double node_time = _headers[i];
+
+			auto node_it =
+				_all_gnss_node.find(node_time);
+
+			if (node_it == _all_gnss_node.end())
+			{
+				std::cerr
+					<< "[LC WARNING] Cannot find GNSS node at time: "
+					<< std::setprecision(10)
+					<< node_time
+					<< std::endl;
+
+				continue;
+			}
+
+			const t_gposdata::data_pos& lc_solution =
+				node_it->second.lc_solution;
+
+			GnssPositionFactor* position_factor =
+				new GnssPositionFactor(
+					lc_solution.pos,
+					lc_solution.Rpos,
+					lever
+				);
+
+			problem.AddResidualBlock(
+				position_factor,
+				NULL,
+				_para_pose[i]
+			);
+
+			lc_factor_count++;
 
 			std::cout
-				<< summary.BriefReport()
+				<< "[LC FACTOR]"
+				<< " frame=" << i
+				<< " time="
+				<< std::setprecision(10)
+				<< node_time
+				<< " rtk_pos="
+				<< lc_solution.pos.transpose()
+				<< " rtk_var="
+				<< lc_solution.Rpos.transpose()
+				<< std::endl;
+		}
+
+		// 缺少 RTK 位置约束时，不接受仅由 IMU 和先验求出的状态。
+		if (lc_factor_count == 0)
+		{
+			std::cerr
+				<< "[LC ERROR] No valid RTK position factor in current window."
 				<< std::endl;
 
-			//Check loosely coupled optimization result
+			_opt_valid = 0;
+			_opt_flag = false;
+			return;
+		}
 
-			if (summary.IsSolutionUsable())
-			{
-				_opt_valid = 1;
-				lc_optimization_valid = true;
-			}
-			else
-			{
-				_opt_valid = 0;
-				lc_optimization_valid = false;
-			}
+		ceres::Solver::Options options;
 
-			// LC does not perform DD satellite-level outlier iteration
-			iter_flag = false;
+		options.linear_solver_type =
+			ceres::DENSE_SCHUR;
 
-		} while (iter_flag);
+		options.trust_region_strategy_type =
+			ceres::DOGLEG;
 
-		//Write optimized result back
+		options.max_num_iterations = 5;
+
+		ceres::Solver::Summary summary;
+
+		ceres::Solve(
+			options,
+			&problem,
+			&summary
+		);
+
+		std::cout
+			<< summary.BriefReport()
+			<< std::endl;
+
+		_opt_valid = summary.IsSolutionUsable();
+
 		std::cout
 			<< "[LC OPT] Epoch: "
 			<< _cur_node_time
@@ -1860,7 +1779,7 @@ void gfgomsf::t_gfgo_gins::_gins_optimization()
 			<< fgo_gins.toc()
 			<< std::endl;
 
-		if (lc_optimization_valid)
+		if (_opt_valid)
 		{
 			_gins_double_to_vector();
 
@@ -1908,7 +1827,7 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 		{
 			return;
 		}
-		// CTraj/GINS Schur ordering: [marginalized | retained]. Source notice is in ct_marginalization.h.
+		// Schur 变量排列为 [待边缘化 | 保留]，来源声明见 ct_marginalization.h。
 		int m = system.marginalized_size;
 		int n = static_cast<int>(system.gradient.size()) - m;
 		Eigen::MatrixXd hessian = system.hessian.bottomRightCorner(n, n);
@@ -1954,7 +1873,7 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			}
 		}
 		system.prior.jacobian = square_root.asDiagonal() * eigen_n.eigenvectors().transpose();
-		// g = J^T*r, so the new prior is r0 + J*dx (GINS uses b=-g and J*dx-r0).
+		// 此处 g=J^T*r，先验写作 r0+J*dx；离散 GINS 使用 b=-g 和 J*dx-r0。
 		system.prior.residual = inverse_root.asDiagonal() * eigen_n.eigenvectors().transpose() * gradient;
 		_ct_backend.SetPendingMarginalization(system.prior);
 		std::cout << "[CT MARG] start=" << system.prior.start_time
@@ -2122,17 +2041,10 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 			_initial_prior = false;
 		}
 		else if(_msf_type==MSF_TYPE::GINS_LC_MODE){
-			//Synchronize Eigen states
 			_gins_vector_to_double();
-
-
-			 //Create new marginalization container
 
 			MarginalizationInfo* marginalization_info =
 				new MarginalizationInfo();
-
-
-			 //Add previous marginalization prior
 
 			if (_last_marginalization_info &&
 				_last_marginalization_info->valid)
@@ -2150,11 +2062,9 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 					}
 				}
 
-
 				MarginalizationFactor* marginalization_factor =
 					new MarginalizationFactor(
 						_last_marginalization_info);
-
 
 				ResidualBlockInfo* residual_block_info =
 					new ResidualBlockInfo(
@@ -2167,8 +2077,7 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 					residual_block_info);
 			}
 
-
-			 //Add IMU factor between state 0 and state 1
+			// 边缘化首个状态，同时消去相邻 IMU 约束中的首帧位姿、速度和零偏。
 			if (_imu_enable)
 			{
 				if (_pre_integrations[1] != nullptr &&
@@ -2177,7 +2086,6 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 					IMUFactor* imu_factor =
 						new IMUFactor(
 							_pre_integrations[1]);
-
 
 					ResidualBlockInfo* residual_block_info =
 						new ResidualBlockInfo(
@@ -2202,17 +2110,13 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 				}
 			}
 
-
-
-			 //Add RTK position factor belonging to oldest state X0
+			// 最老节点的位置因子随该状态一起边缘化，其余位置观测保留。
 
 			const double oldest_time = _headers[0];
 
-
 			auto node_it =_all_gnss_node.find(oldest_time);
 
-
-			if (node_it != _all_gnss_node.end() &&node_it->second.has_lc_solution)
+			if (node_it != _all_gnss_node.end())
 			{
 				const t_gposdata::data_pos& lc_solution =node_it->second.lc_solution;
 
@@ -2241,10 +2145,6 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 					<< std::endl;
 			}
 
-
-
-			//Perform marginalization
-
 			if (!marginalization_info->factors.empty())
 			{
 				marginalization_info->preMarginalize();
@@ -2261,11 +2161,7 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 					<< std::endl;
 			}
 
-
-			//Shift parameter addresses
-
 			std::map<long, double*> addr_shift;
-
 
 			for (int i = 1; i <= _rover_count; ++i)
 			{
@@ -2277,11 +2173,7 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 				}
 			}
 
-
-
-			 //Obtain parameter blocks retained in new prior
-
-			if (marginalization_info->valid && marginalization_info->n > 0)
+			if (marginalization_info->valid)
 			{
 				_last_marginalization_parameter_blocks =
 					marginalization_info->getParameterBlocks(addr_shift);
@@ -2293,27 +2185,12 @@ void gfgomsf::t_gfgo_gins::_gins_marginalization()
 				_last_marginalization_parameter_blocks.clear();
 			}
 
-
-
-			//Replace old prior with new prior
-	
-			if (_last_marginalization_info)
-			{
-				delete _last_marginalization_info;
-
-				_last_marginalization_info = nullptr;
-			}
-
+			delete _last_marginalization_info;
 
 			_last_marginalization_info =
 				marginalization_info;
 
-
 			_initial_prior = false;
-
-
-
-
 
 			std::cout
 				<< "[LC MARG]"
@@ -2397,7 +2274,6 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 	}
 	else if (_msf_type == MSF_TYPE::GINS_LC_MODE) {
 		const int old_rover_count = _rover_count;
-		//Shift states
 		for (int i = 0; i < old_rover_count; ++i)
 		{
 			_headers[i] = _headers[i + 1];
@@ -2407,8 +2283,6 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 
 			if (_imu_enable)
 			{
-
-			//Pre-integration indexing:
 
 				std::swap(
 					_pre_integrations[i],
@@ -2433,15 +2307,11 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 			}
 		}
 
-
-		 //Prepare the free slot for the next IMU pre-integration
-
 		if (_imu_enable)
 		{
-			// After the state shift, the newest retained state is here
+			// 滑窗后，末端空槽的预积分从最后一个保留状态开始。
 			const int newest_state_index =old_rover_count - 1;
 
-			// The last pre-integration slot is now free
 			delete _pre_integrations[old_rover_count];
 
 			_pre_integrations[old_rover_count] =
@@ -2466,11 +2336,7 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 
 			_angular_velocity_buf[old_rover_count].clear();
 
-			if (_tmp_pre_integration != nullptr)
-			{
-				delete _tmp_pre_integration;
-				_tmp_pre_integration = nullptr;
-			}
+			delete _tmp_pre_integration;
 
 			_tmp_pre_integration =
 				new IntegrationBase{
@@ -2488,17 +2354,12 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 				_gravity
 			);
 		}
-		// 3. Remove the oldest GNSS/RTK node
 		auto old_node =
 			_all_gnss_node.find(t_0);
 
 		if (old_node != _all_gnss_node.end())
 		{
-			if (old_node->second.pre_integration != nullptr)
-			{
-				delete old_node->second.pre_integration;
-				old_node->second.pre_integration = nullptr;
-			}
+			delete old_node->second.pre_integration;
 
 			_all_gnss_node.erase(old_node);
 		}
@@ -2510,9 +2371,7 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 				<< t_0
 				<< std::endl;
 		}
-		// 4. Release one state slot
 		--_rover_count;
-
 
 		std::cout
 			<< "[LC SLIDE]"
@@ -2525,7 +2384,7 @@ void gfgomsf::t_gfgo_gins::_slide_gins()
 			<< _all_gnss_node.size()
 			<< std::endl;
 	}
-	
+
 }
 
 void gfgomsf::t_gfgo_gins::_gins_posteriori_test(ceres::Problem& problem)
@@ -2887,34 +2746,21 @@ void gfgomsf::t_gfgo_gins::clearGNSSmsg()
 	{
 		for (auto& node : _all_gnss_node)
 		{
-			if (node.second.pre_integration != nullptr)
-			{
-				delete node.second.pre_integration;
-				node.second.pre_integration = nullptr;
-			}
+			delete node.second.pre_integration;
 		}
 		_all_gnss_node.clear();
 		for (int i = 0; i <= WINDOW_SIZE; ++i)
 		{
-			if (_pre_integrations[i] != nullptr)
-			{
-				delete _pre_integrations[i];
-				_pre_integrations[i] = nullptr;
-			}
+			delete _pre_integrations[i];
+			_pre_integrations[i] = nullptr;
 			_dt_buf[i].clear();
 			_linear_acceleration_buf[i].clear();
 			_angular_velocity_buf[i].clear();
 		}
-		if (_tmp_pre_integration != nullptr)
-		{
-			delete _tmp_pre_integration;
-			_tmp_pre_integration = nullptr;
-		}
-		if (_last_marginalization_info != nullptr)
-		{
-			delete _last_marginalization_info;
-			_last_marginalization_info = nullptr;
-		}
+		delete _tmp_pre_integration;
+		_tmp_pre_integration = nullptr;
+		delete _last_marginalization_info;
+		_last_marginalization_info = nullptr;
 		_last_marginalization_parameter_blocks.clear();
 		_rover_count = -1;
 		_initial_prior = true;

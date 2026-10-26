@@ -1,4 +1,4 @@
-// CTraj: Continuous-Time Trajectory (Time-Varying State) Representation and Estimation Library
+﻿// CTraj: Continuous-Time Trajectory (Time-Varying State) Representation and Estimation Library
 // Copyright 2024, the School of Geodesy and Geomatics (SGG), Wuhan University, China
 // https://github.com/Unsigned-Long/CTraj.git
 //
@@ -61,7 +61,7 @@ struct CtMarginalizationFactor
             {
                 Eigen::Map<const Eigen::Quaternion<T>> rotation(parameters[i]);
                 Eigen::Quaternion<T> reference(T(block.value[3]), T(block.value[0]),T(block.value[1]), T(block.value[2]));
-                // EigenQuaternionManifold uses left increments with half-angle coordinates.
+                // EigenQuaternionManifold 使用左乘增量，其局部坐标为旋转向量的一半。
                 Sophus::SO3<T> difference(rotation * reference.conjugate());
                 delta.template segment<3>(3 * i) = T(0.5) * difference.log();
             }
