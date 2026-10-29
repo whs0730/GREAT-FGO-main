@@ -57,11 +57,14 @@ struct CtGnssPosition {
     double time_s = std::numeric_limits<double>::quiet_NaN();
     Eigen::Vector3d position_ecef_m = Eigen::Vector3d::Zero();
     Eigen::Matrix3d position_covariance_ecef_m2 = Eigen::Matrix3d::Zero();
+    // 有效协方差为 scale*原始协方差；保留原矩阵，避免滑窗重复放大。
+    double covariance_scale = 1.0;
 
     bool IsValid() const 
     {
         if (!std::isfinite(time_s) || !position_ecef_m.allFinite()
             || !position_covariance_ecef_m2.allFinite()
+            || !std::isfinite(covariance_scale) || covariance_scale < 1.0
             || !position_covariance_ecef_m2.isApprox(
                 position_covariance_ecef_m2.transpose(), 1e-12)) 
         {

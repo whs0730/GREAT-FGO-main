@@ -10,6 +10,7 @@
  */
 
 #include "gsetfgo.h"
+#include <stdexcept>
 
 namespace gfgo
 {
@@ -356,6 +357,37 @@ namespace gfgo
 			return 0.0;
 		}
 		return std::stod(x);
+	}
+
+	bool t_gsetfgo::ct_gnss_adaptive()
+	{
+		_gmutex.lock();
+		string x = _doc.child(XMLKEY_ROOT).child(XMLKEY_FGO).child_value("ct_gnss_adaptive");
+		_gmutex.unlock();
+		str_erase(x);
+		if (!x.empty() && x != "0" && x != "1")
+		{
+			throw std::invalid_argument("ct_gnss_adaptive must be 0 or 1");
+		}
+		return x == "1";
+	}
+
+	double t_gsetfgo::ct_gnss_scale_lambda()
+	{
+		_gmutex.lock();
+		string x = _doc.child(XMLKEY_ROOT).child(XMLKEY_FGO).child_value("ct_gnss_scale_lambda");
+		_gmutex.unlock();
+		str_erase(x);
+		return x.empty() ? 1.0 : std::stod(x);
+	}
+
+	double t_gsetfgo::ct_gnss_scale_max()
+	{
+		_gmutex.lock();
+		string x = _doc.child(XMLKEY_ROOT).child(XMLKEY_FGO).child_value("ct_gnss_scale_max");
+		_gmutex.unlock();
+		str_erase(x);
+		return x.empty() ? 100.0 : std::stod(x);
 	}
 
 	int t_gsetfgo::estimate_extrinsic()

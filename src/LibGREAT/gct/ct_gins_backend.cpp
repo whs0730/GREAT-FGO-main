@@ -1,5 +1,6 @@
 ﻿#include "gct/ct_gins_backend.h"
 #include "gfactor/imu_gyro_factor.hpp"
+#include "gct/ct_gnss_weighting.h"
 #include "gfactor/imu_acce_factor.hpp"
 #include "gfactor/ct_gnss_position_factor.h"
 #include "gfactor/ct_marginalization_factor.h"
@@ -681,6 +682,92 @@ bool CtGinsBackend::LinearizeMarginalization(double duration_s, const CtGinsSolv
 
 CtGinsSolveResult CtGinsBackend::Solve(const CtGinsSolveOptions& options)
 {
+    if (!options.adaptive_gnss)
+    {
+        return SolveFixedWeights(options);
+    }
+    if (!std::isfinite(options.gnss_scale_lambda) || options.gnss_scale_lambda < 0.0
+        || !std::isfinite(options.gnss_scale_max) || options.gnss_scale_max < 1.0)
+    {
+        throw std::invalid_argument("CT GNSS scale requires finite lambda >= 0 and maximum >= 1");
+    }
+    // 初解、尺度更新和二次求解共同提交；任一步失败都保留原轨迹、零偏和权重。
+    CtGinsBackend candidate = *this;
+    CtGinsSolveResult preliminary = candidate.SolveFixedWeights(options);
+    if (!preliminary.usable)
+    {
+        return preliminary;
+    }
+    std::vector<CtGnssWeightUpdate> updates = candidate.UpdateGnssCovarianceScales(options);
+    CtGinsSolveResult result = candidate.SolveFixedWeights(options);
+    result.preliminary_iterations = preliminary.iterations;
+    result.iterations += preliminary.iterations;
+    result.gnss_weight_updates = std::move(updates);
+    if (result.usable)
+    {
+        *this = std::move(candidate);
+    }
+    return result;
+}
+
+double CtGinsBackend::ObservationEndTime() const
+{
+    double start_time = _position_spline.MinTime();
+    double end_time = _position_spline.MaxTime();
+    if (_marginalization_enabled)
+    {
+        // 尾段过短时，末个控制点近乎无约束；先保留这些观测，等完整一段后再参与求解。
+        double complete_end = start_time + std::floor(
+            (_imu_data.back().time_s - start_time) / _knot_interval) * _knot_interval;
+        if (complete_end > start_time)
+        {
+            end_time = std::min(end_time,
+                std::nextafter(complete_end, std::numeric_limits<double>::infinity()));
+        }
+    }
+    return end_time;
+}
+
+std::vector<CtGnssWeightUpdate> CtGinsBackend::UpdateGnssCovarianceScales(const CtGinsSolveOptions& options)
+{
+    std::vector<CtGnssWeightUpdate> updates;
+    double start_time = _position_spline.MinTime();
+    double end_time = ObservationEndTime();
+    double previous_scale = 1.0;
+    for (std::size_t i = 0; i < _gnss_data.size(); i++)
+    {
+        CtGnssPosition& observation = _gnss_data[i];
+        if (observation.time_s < start_time)
+        {
+            // 窗前保留的最后一条观测提供时间平滑的边界，不重估已进入先验的权重。
+            previous_scale = observation.covariance_scale;
+            continue;
+        }
+        if (observation.time_s >= end_time)
+        {
+            break;
+        }
+        Eigen::Vector3d prediction = _position_spline.Evaluate(observation.time_s)
+            + _attitude_spline.Evaluate(observation.time_s) * _lever_arm;
+        Eigen::Vector3d error = prediction - (observation.position_ecef_m - _position_origin);
+        Eigen::LLT<Eigen::Matrix3d> decomposition(observation.position_covariance_ecef_m2);
+        Eigen::Vector3d normalized_error = decomposition.matrixL().solve(error);
+        double q = normalized_error.squaredNorm();
+        if (!std::isfinite(q))
+        {
+            throw std::runtime_error("CT GNSS scale update produced a nonfinite normalized residual");
+        }
+        double scale = EstimateGnssCovarianceScale(q, previous_scale,
+            options.gnss_scale_lambda, options.gnss_scale_max);
+        updates.push_back(CtGnssWeightUpdate{observation.time_s, q, previous_scale, scale});
+        observation.covariance_scale = scale;
+        previous_scale = scale;
+    }
+    return updates;
+}
+
+CtGinsSolveResult CtGinsBackend::SolveFixedWeights(const CtGinsSolveOptions& options)
+{
     if (!_initialized || !_parameters_set)
     {
         throw std::logic_error("CT solve requires explicit parameters and an initialized trajectory");
@@ -702,18 +789,7 @@ CtGinsSolveResult CtGinsBackend::Solve(const CtGinsSolveOptions& options)
 
     CtGinsSolveResult result;
     double start_time = _position_spline.MinTime();
-    double end_time = _position_spline.MaxTime();
-    if (_marginalization_enabled)
-    {
-        // 尾段过短时，末个控制点近乎无约束；先保留这些观测，等完整一段后再参与求解。
-        double complete_end = start_time + std::floor(
-            (_imu_data.back().time_s - start_time) / _knot_interval) * _knot_interval;
-        if (complete_end > start_time)
-        {
-            end_time = std::min(end_time,
-                std::nextafter(complete_end, std::numeric_limits<double>::infinity()));
-        }
-    }
+    double end_time = ObservationEndTime();
     result.optimized_until_s = std::min(_imu_data.back().time_s,
         std::nextafter(end_time, start_time));
     // 在副本上求解，失败时保留已接受的轨迹和零偏。

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file         GREAT_GINSFGO.cpp
  * @author       GREAT-WHU (https://github.com/GREAT-WHU)
  * @brief        Main Function for tightly combination RTK/INS basecd on factor graph optimization
@@ -12,6 +12,9 @@
 #include "gcfg_fgomsf.h"
 #include <chrono>
 #include <thread>
+#include <cmath>
+#include <cstdlib>
+#include <stdexcept>
 
 using namespace std;
 using namespace gnut;
@@ -32,6 +35,25 @@ int main(int argc, char** argv)
 	gset.app("G-Nut/PVT", "0.9.0", "$Rev: 2448 $", "(gnss@pecny.cz)", __DATE__, __TIME__);
 	// Get the arguments from the command line
 	gset.arg(argc, argv, true, false);
+	// 参数错误应在读取观测和启动绘图线程前终止。
+	try
+	{
+		if (gset.msf_type() == MSF_TYPE::GINS_CT_MODE && gset.ct_gnss_adaptive())
+		{
+			double lambda = gset.ct_gnss_scale_lambda();
+			double maximum = gset.ct_gnss_scale_max();
+			if (!std::isfinite(lambda) || lambda < 0.0
+				|| !std::isfinite(maximum) || maximum < 1.0)
+			{
+				throw std::invalid_argument("CT GNSS scale requires finite lambda >= 0 and maximum >= 1");
+			}
+		}
+	}
+	catch (const std::exception& error)
+	{
+		std::cerr << "[CT ERROR] " << error.what() << std::endl;
+		return EXIT_FAILURE;
+	}
 
 	auto log_type = dynamic_cast<t_gsetout*>(&gset)->log_type();
 	auto log_level = dynamic_cast<t_gsetout*>(&gset)->log_level();

@@ -27,7 +27,7 @@ namespace gfgomsf
     private:
         /// GNSS 天线相对固定 ECEF 原点的位置（m）
         Eigen::Vector3d _gnss_position;
-        /// ECEF 协方差满足 Sigma=L*L^T，平方根信息矩阵为 L^-1
+        /// 有效 ECEF 协方差为 scale*R，平方根信息矩阵满足 W^T*W=(scale*R)^-1。
         Eigen::Matrix3d _sqrt_info;
         /// 机体系下 IMU 指向天线的杆臂（m）
         Eigen::Vector3d _lever_arm;
@@ -45,6 +45,7 @@ namespace gfgomsf
         {
             if (!std::isfinite(observation.time_s) || !observation.position_ecef_m.allFinite()
                 || !observation.position_covariance_ecef_m2.allFinite()
+                || !std::isfinite(observation.covariance_scale) || observation.covariance_scale < 1.0
                 || !observation.position_covariance_ecef_m2.isApprox(
                     observation.position_covariance_ecef_m2.transpose(), 1e-12)
                 || !_lever_arm.allFinite() || !position_origin_ecef_m.allFinite())
@@ -67,6 +68,10 @@ namespace gfgomsf
             }
             Eigen::Matrix3d identity = Eigen::Matrix3d::Identity();
             _sqrt_info = decomposition.matrixL().solve(identity);
+            if (observation.covariance_scale != 1.0)
+            {
+                _sqrt_info /= std::sqrt(observation.covariance_scale);
+            }
             if (!_sqrt_info.allFinite()) 
             {
                 throw std::invalid_argument("CT GNSS covariance produces nonfinite square-root information");
@@ -93,7 +98,7 @@ namespace gfgomsf
             return typeid(CtGnssPositionFactor<Order>).hash_code();
         }
 
-        // 观测与位置样条使用同一原点；残差为 L^-1*(p(t)+R(t)*lever-z_GNSS)。
+        // 观测与位置样条使用同一原点；残差为 W*(p(t)+R(t)*lever-z_GNSS)。
         template <class T>
         bool operator()(T const* const* parameters, T* residuals) const
         {

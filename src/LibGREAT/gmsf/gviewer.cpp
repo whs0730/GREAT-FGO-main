@@ -11,6 +11,7 @@
 
 #include "gpublish.h"
 #include <iostream>
+#include <atomic>
 
 
 void MyPerspective(GLdouble fov, GLdouble aspectRatio, GLdouble zNear, GLdouble zFar);
@@ -70,7 +71,7 @@ double m_curr_Z0 = 0;
 
 bool is_pressL = false;
 bool is_pressR = false;
-bool mb_stop = false;
+std::atomic<bool> mb_stop(false);
 
 great::gviewer::gviewer()
 {
@@ -87,6 +88,8 @@ great::gviewer::gviewer()
 
 great::gviewer::~gviewer()
 {
+    // 绘图线程仍访问轨迹和互斥量，释放成员前必须等待线程退出。
+    Hide();
     gviewer::vptr.erase(std::find(gviewer::vptr.begin(), gviewer::vptr.end() - 1, this));
 
 }

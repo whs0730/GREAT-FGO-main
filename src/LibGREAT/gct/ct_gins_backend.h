@@ -35,6 +35,17 @@ struct CtGinsSolveOptions
     double initial_attitude_std_rad = 0.05;
     int max_iterations = 100;
     int num_threads = 1;
+    bool adaptive_gnss = false;
+    double gnss_scale_lambda = 1.0;
+    double gnss_scale_max = 100.0;
+};
+
+struct CtGnssWeightUpdate
+{
+    double time_s = 0.0;
+    double squared_error = 0.0;
+    double previous_scale = 1.0;
+    double covariance_scale = 1.0;
 };
 
 struct CtGinsSolveResult
@@ -46,7 +57,11 @@ struct CtGinsSolveResult
     std::size_t gnss_positions_used = 0;
     std::size_t imu_samples_skipped = 0;
     std::size_t gnss_positions_skipped = 0;
+    // 自适应模式累计两轮迭代；代价和 message 仅描述最后一轮。
     int iterations = 0;
+    int preliminary_iterations = 0;
+    // 更新统计使用初解残差；初解和二次求解的轨迹代价使用不同权重，不直接作降幅比较。
+    std::vector<CtGnssWeightUpdate> gnss_weight_updates;
     // Ceres 代价为加权残差平方和的一半。
     double initial_cost = 0.0;
     double final_cost = 0.0;
@@ -111,6 +126,9 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
 private:
+    CtGinsSolveResult SolveFixedWeights(const CtGinsSolveOptions& options);
+    double ObservationEndTime() const;
+    std::vector<CtGnssWeightUpdate> UpdateGnssCovarianceScales(const CtGinsSolveOptions& options);
     double _knot_interval;
     bool _initialized;
     bool _parameters_set;

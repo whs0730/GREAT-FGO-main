@@ -235,6 +235,12 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 		options.gyro_std_rad_s = _gyr_n;
 		options.accel_std_m_s2 = _acc_n;
 		options.max_iterations = _max_num_iterations;
+		options.adaptive_gnss = fgo_settings->ct_gnss_adaptive();
+		if (options.adaptive_gnss)
+		{
+			options.gnss_scale_lambda = fgo_settings->ct_gnss_scale_lambda();
+			options.gnss_scale_max = fgo_settings->ct_gnss_scale_max();
+		}
 		Eigen::Vector3d attitude_std = integration_settings->initial_misalignment_std();
 		Eigen::Vector3d gyro_std = integration_settings->initial_gyro_std();
 		Eigen::Vector3d accel_std = integration_settings->initial_acce_std();
@@ -428,6 +434,22 @@ int gfgomsf::t_gfgo_gins::_process_ct_batch(const t_gtime& beg, const t_gtime& e
 				<< " gnss_buffer=" << backend.GetGnssPositions().size()
 				<< " " << result.message << " imu_used=" << result.imu_samples_used
 				<< " gnss_used=" << result.gnss_positions_used << std::endl;
+			if (options.adaptive_gnss)
+			{
+				std::streamsize previous_precision = std::cout.precision(17);
+				std::cout << "[CT GNSS SCALE] window=" << window_count
+					<< " preliminary_iterations=" << result.preliminary_iterations
+					<< " total_iterations=" << result.iterations << std::endl;
+				for (std::size_t i = 0; i < result.gnss_weight_updates.size(); i++)
+				{
+					const gct::CtGnssWeightUpdate& weight = result.gnss_weight_updates[i];
+					std::cout << "[CT GNSS WEIGHT] window=" << window_count
+						<< " time=" << weight.time_s << " q=" << weight.squared_error
+						<< " previous_scale=" << weight.previous_scale
+						<< " scale=" << weight.covariance_scale << std::endl;
+				}
+				std::cout.precision(previous_precision);
+			}
 			double last_time = last_imu_time;
 			if (window_mode)
 			{

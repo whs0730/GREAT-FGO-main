@@ -25,3 +25,4 @@ sample_data/
 evaluate_ct_window_data05.py
 .ai-memory.toml
 output/
+.archify/

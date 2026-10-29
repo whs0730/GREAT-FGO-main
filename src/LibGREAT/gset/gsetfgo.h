@@ -155,6 +155,9 @@ namespace  gfgo
 		double ct_window_sec();
 		double ct_update_sec();
 		double ct_knot_sec();
+		bool ct_gnss_adaptive();
+		double ct_gnss_scale_lambda();
+		double ct_gnss_scale_max();
 
 		/**
 		* @brief  check whether estimate cam->IMU extrinsic parameters.
